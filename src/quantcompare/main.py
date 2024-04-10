@@ -22,10 +22,6 @@ warnings.filterwarnings('ignore', category=RuntimeWarning,
 np.seterr(divide='ignore', invalid='ignore')
 
 
-def read_parquet_file(filepath: str) -> pd.DataFrame:
-    df = pd.read_parquet(filepath, engine='pyarrow')
-    return df
-
 
 def ratio_uncertainty(mu_A: float, sigma_A: float, mu_B: float, sigma_B: float) -> float:
     """
@@ -377,8 +373,12 @@ class GroupRatio:
     QuantGroup1: List[QuantGroup]
     QuantGroup2: List[QuantGroup]
     ratio_function: Callable
+
+    # global properties
     qvalue: float = None
     norm_qvalue: float = None
+    centered_log2_ratio: float = None
+    centered_norm_log2_ratio: float = None
 
     @cached_property
     def _log2_ratio(self) -> Tuple[float, float, float]:
@@ -393,8 +393,16 @@ class GroupRatio:
         return 2 ** self.log2_ratio
 
     @property
+    def centered_ratio(self) -> float:
+        return 2 ** self.centered_log2_ratio
+
+    @property
     def norm_ratio(self) -> float:
         return 2 ** self.log2_norm_ratio
+
+    @property
+    def centered_norm_ratio(self) -> float:
+        return 2 ** self.centered_norm_log2_ratio
 
     @property
     def log2_ratio(self) -> float:
@@ -604,16 +612,34 @@ def _get_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, 
     columns.extend(groupby_cols)
     for key in pair_keys:
         columns.extend(
-            [f'intensities_{key}', f'norm_intensities_{key}', f'total_intensity_{key}', f'total_norm_intensity_{key}',
-             f'average_intensity_{key}', f'norm_average_intensity_{key}'])
+            [
+                 f'intensities_{key}',
+                 f'total_intensity_{key}',
+                 f'average_intensity_{key}',
+                 f'norm_intensities_{key}',
+                 f'total_norm_intensity_{key}',
+                 f'average_norm_intensity_{key}'
+             ]
+        )
     for pair in pairs:
         columns.extend(
-            [f'log2_ratio_{pair[0]}_{pair[1]}', f'log2_ratio_std_{pair[0]}_{pair[1]}', f'pvalue_{pair[0]}_{pair[1]}',
-             f'qvalue_{pair[0]}_{pair[1]}',
-             f'norm_log2_ratio_{pair[0]}_{pair[1]}',
-             f'norm_log2_ratio_std_{pair[0]}_{pair[1]}', f'norm_pvalue_{pair[0]}_{pair[1]}',
-             f'norm_qvalue_{pair[0]}_{pair[1]}',
-             f'ratio_{pair[0]}_{pair[1]}', f'norm_ratio_{pair[0]}_{pair[1]}'])
+            [
+                 f'ratio_{pair[0]}_{pair[1]}',
+                 f'centered_ratio_{pair[0]}_{pair[1]}',
+                 f'log2_ratio_{pair[0]}_{pair[1]}',
+                 f'centered_log2_ratio_{pair[0]}_{pair[1]}',
+                 f'log2_ratio_std_{pair[0]}_{pair[1]}',
+                 f'log2_ratio_pvalue_{pair[0]}_{pair[1]}',
+                 f'log2_ratio_qvalue_{pair[0]}_{pair[1]}',
+                 f'norm_ratio_{pair[0]}_{pair[1]}',
+                 f'centered_norm_ratio_{pair[0]}_{pair[1]}',
+                 f'norm_log2_ratio_{pair[0]}_{pair[1]}',
+                 f'centered_norm_log2_ratio_{pair[0]}_{pair[1]}',
+                 f'norm_log2_ratio_std_{pair[0]}_{pair[1]}',
+                 f'norm_log2_pvalue_{pair[0]}_{pair[1]}',
+                 f'norm_log2_qvalue_{pair[0]}_{pair[1]}',
+             ]
+        )
     columns.append('cnt')
 
     datas = []
@@ -626,24 +652,41 @@ def _get_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, 
         for quant_ratio in group:
             cnt += 1
             pair_dict[(quant_ratio.QuantGroup1[0].group, quant_ratio.QuantGroup2[0].group)] = \
-                (quant_ratio.log2_ratio, quant_ratio.log2_ratio_std, quant_ratio.log2_ratio_pvalue,
-                 quant_ratio.qvalue,
-                 quant_ratio.log2_norm_ratio, quant_ratio.log2_norm_ratio_std, quant_ratio.log2_norm_ratio_pvalue,
-                 quant_ratio.norm_qvalue,
-                 quant_ratio.ratio, quant_ratio.norm_ratio)
+                (
+                     quant_ratio.ratio,
+                     quant_ratio.centered_ratio,
+                     quant_ratio.log2_ratio,
+                     quant_ratio.centered_log2_ratio,
+                     quant_ratio.log2_ratio_std,
+                     quant_ratio.log2_ratio_pvalue,
+                     quant_ratio.qvalue,
+                     quant_ratio.norm_ratio,
+                     quant_ratio.centered_norm_ratio,
+                     quant_ratio.log2_norm_ratio,
+                     quant_ratio.centered_norm_log2_ratio,
+                     quant_ratio.log2_norm_ratio_std,
+                     quant_ratio.log2_norm_ratio_pvalue,
+                     quant_ratio.norm_qvalue,
+                )
 
             g1, g2 = quant_ratio.group1, quant_ratio.group2
 
             if g1 not in key_dict:
                 key_dict[g1] = (
-                    quant_ratio.group1_intensity, quant_ratio.group1_norm_intensity, quant_ratio.group1_total_intensity,
-                    quant_ratio.group1_total_norm_intensity, quant_ratio.group1_average_intensity,
+                    quant_ratio.group1_intensity,
+                    quant_ratio.group1_total_intensity,
+                    quant_ratio.group1_average_intensity,
+                    quant_ratio.group1_norm_intensity,
+                    quant_ratio.group1_total_norm_intensity,
                     quant_ratio.group1_norm_average_intensity)
 
             if g2 not in key_dict:
                 key_dict[g2] = (
-                    quant_ratio.group2_intensity, quant_ratio.group2_norm_intensity, quant_ratio.group2_total_intensity,
-                    quant_ratio.group2_total_norm_intensity, quant_ratio.group2_average_intensity,
+                    quant_ratio.group2_intensity,
+                    quant_ratio.group2_total_intensity,
+                    quant_ratio.group2_average_intensity,
+                    quant_ratio.group2_norm_intensity,
+                    quant_ratio.group2_total_norm_intensity,
                     quant_ratio.group2_norm_average_intensity)
 
         if isinstance(key, tuple):
@@ -698,6 +741,52 @@ def assign_qvalues(group_ratios: List[GroupRatio]) -> None:
         qr.norm_qvalue = norm_qvalues[i]
 
 
+def assign_centered_log2_ratios(group_ratios: List[GroupRatio], center_type: str, inf_replacement: int) -> None:
+    # Assuming group_ratios is your list of objects with p-values and you want to update them with q-values
+    log2_ratios = [qr.log2_ratio for qr in group_ratios]
+    log2_norm_ratios = [qr.log2_norm_ratio for qr in group_ratios]
+
+    # Filter out NaN values and keep track of their original indices
+    non_nan_indices = [i for i, lr in enumerate(log2_ratios) if not np.isnan(lr)]
+    non_nan_log2_ratios = [lr for lr in log2_ratios if not np.isnan(lr)]
+
+    # replace infinities
+    non_nan_log2_ratios = [inf_replacement if np.isposinf(lr) else lr for lr in non_nan_log2_ratios]
+    non_nan_log2_ratios = [-inf_replacement if np.isneginf(lr) else lr for lr in non_nan_log2_ratios]
+
+    non_nan_norm_indices = [i for i, lr in enumerate(log2_norm_ratios) if not np.isnan(lr)]
+    non_nan_log2_norm_ratios = [lr for lr in log2_norm_ratios if not np.isnan(lr)]
+
+    # replace infinities
+    non_nan_log2_norm_ratios = [inf_replacement if np.isposinf(lr) else lr for lr in non_nan_log2_norm_ratios]
+    non_nan_log2_norm_ratios = [-inf_replacement if np.isneginf(lr) else lr for lr in non_nan_log2_norm_ratios]
+
+    centered_log2_ratios = np.full(len(log2_ratios), np.nan)  # Initialize full array with NaNs
+    centered_log2_norm_ratios = np.full(len(log2_norm_ratios), np.nan)
+
+    def center_log2_ratios(log2_ratios, center_type):
+
+        if center_type == 'mean':
+            return log2_ratios - np.mean(log2_ratios)
+        elif center_type == 'median':
+            return log2_ratios - np.median(log2_ratios)
+        else:
+            raise ValueError(f'Invalid center_type: {center_type}')
+
+    if non_nan_log2_ratios:
+        centered_log2_ratios_non_nan = center_log2_ratios(non_nan_log2_ratios, center_type)
+        centered_log2_ratios[non_nan_indices] = centered_log2_ratios_non_nan  # Update only the non-NaN positions
+
+    if non_nan_log2_norm_ratios:
+        centered_log2_norm_ratios_non_nan = center_log2_ratios(non_nan_log2_norm_ratios, center_type)
+        centered_log2_norm_ratios[non_nan_norm_indices] = centered_log2_norm_ratios_non_nan
+
+    # Update the original objects with the calculated q-values
+    for i, qr in enumerate(group_ratios):
+        qr.centered_log2_ratio = centered_log2_ratios[i]
+        qr.centered_norm_log2_ratio = centered_log2_norm_ratios[i]
+
+
 def group_quant_groups(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, Any]], group_function: Callable,
                        ratio_function: Callable) -> List[
     GroupRatio]:
@@ -705,6 +794,7 @@ def group_quant_groups(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, An
 
     group_ratios = []
     for key, grouped_quant_groups in tqdm.tqdm(groupby(quant_groups, group_function), desc='Generating Group Ratios'):
+
         grouped_quant_groups = list(grouped_quant_groups)
         group_to_quant_group = {}
         for quant_group in grouped_quant_groups:
@@ -720,8 +810,6 @@ def group_quant_groups(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, An
             # calculate pvalue and norm_pvalue (cached property)
             _ = group_ratio.log2_ratio_pvalue
             _ = group_ratio.log2_norm_ratio_pvalue
-
-    assign_qvalues(group_ratios)
 
     return group_ratios
 
@@ -872,6 +960,8 @@ def parse_args():
     parser.add_argument('--no_psms', action='store_true', help='Dont output a PSM ratio file.')
     parser.add_argument('--no_peptides', action='store_true', help='Dont output a Peptide ratio file.')
     parser.add_argument('--no_proteins', action='store_true', help='Dont output a Protein ratio file.')
+    parser.add_argument('--center', choices=['mean', 'median'], default='median', help='Center the Log2 Ratios around the mean/median.')
+    parser.add_argument('--max_rows', default=-1, type=int, help='(DEBUG OPTION) Maximum number of rows to read from the input file. Default is -1 (read all rows).')
     return parser.parse_args()
 
 
@@ -895,7 +985,13 @@ def run():
         os.makedirs(args.output_folder)
 
     print(f'Reading Input File: {args.input_file}')
-    sage_df = read_parquet_file(args.input_file)
+
+    if args.max_rows > 0:
+        print(f'{"Reading only the first":<20} {args.max_rows} rows')
+        sage_df = pd.read_parquet(args.input_file, engine='pyarrow').head(args.max_rows)
+    else:
+        sage_df = pd.read_parquet(args.input_file, engine='pyarrow')
+
     quant_groups = make_quant_groups(sage_df, args.groups)
     print(f"{'Loaded Quant Groups:':<20} {len(quant_groups)}")
     print()
@@ -905,21 +1001,24 @@ def run():
     if not args.no_psms:
         print('Grouping by PSMs...')
         psm_quant_ratios = group_by_psms(quant_groups, args.pairs, args.groupby_filename, ratio_function)
+        assign_qvalues(psm_quant_ratios)
+        assign_centered_log2_ratios(psm_quant_ratios, args.center, args.inf_replacement)
         print(f"{'PSM Quant Groups:':<20} {len(psm_quant_ratios)}")
         time.sleep(0.1)
 
-        psm_file = os.path.join(args.output_folder, 'psm_ratios.parquet')
         cols, data = get_psm_ratio_data_wide(psm_quant_ratios, args.pairs, args.groupby_filename)
         psm_df = pd.DataFrame(data, columns=cols)
 
+        psm_file = os.path.join(args.output_folder, args.psm_file + f'.{args.output_type}')
         if args.output_type == 'csv':
             psm_df.to_csv(os.path.join(args.output_folder, psm_file), index=False)
         elif args.output_type == 'parquet':
             psm_df.to_parquet(os.path.join(args.output_folder, psm_file))
-
-        # write_psm_ratios(psm_quant_ratios, psm_file, args.groupby_filename, args.ratio_function)
-        print(f'PSM Ratios written to {psm_file}')
+        else:
+            raise ValueError(f'Invalid output type: {args.output_type}')
+        print(f'PSM Ratios written to {psm_file}\n')
         print()
+
         del psm_quant_ratios
         del psm_df
         del data
@@ -928,21 +1027,24 @@ def run():
     if not args.no_peptides:
         print('Grouping by Peptides...')
         peptide_quant_ratios = group_by_peptides(quant_groups, args.pairs, args.groupby_filename, ratio_function)
+        assign_qvalues(peptide_quant_ratios)
+        assign_centered_log2_ratios(peptide_quant_ratios, args.center, args.inf_replacement)
         print(f"{'Peptide Quant Groups:':<20} {len(peptide_quant_ratios)}")
         time.sleep(0.1)
-        peptide_file = os.path.join(args.output_folder, 'peptide_ratios.parquet')
+
         cols, data = get_peptide_ratio_data_wide(peptide_quant_ratios, args.pairs, args.groupby_filename)
         peptide_df = pd.DataFrame(data, columns=cols)
 
+        peptide_file = os.path.join(args.output_folder, args.peptide_file + f'.{args.output_type}')
         if args.output_type == 'csv':
             peptide_df.to_parquet(os.path.join(args.output_folder, peptide_file))
         elif args.output_type == 'parquet':
             peptide_df.to_parquet(os.path.join(args.output_folder, peptide_file))
-
-        # peptide_df.to_csv(peptide_file, index=False)
-        # write_peptide_ratios(peptide_quant_ratios, peptide_file, args.groupby_filename, args.ratio_function)
+        else:
+            raise ValueError(f'Invalid output type: {args.output_type}')
         print(f'Peptide Ratios written to {peptide_file}')
         print()
+
         del peptide_quant_ratios
         del peptide_df
         del data
@@ -952,20 +1054,24 @@ def run():
         print('Grouping by Proteins...')
         quant_groups = filter_quant_groups(quant_groups, args.filter)
         protein_quant_ratios = group_by_proteins(quant_groups, args.pairs, args.groupby_filename, ratio_function)
+        assign_qvalues(protein_quant_ratios)
+        assign_centered_log2_ratios(protein_quant_ratios, args.center, args.inf_replacement)
         print(f"{'Protein Quant Groups:':<20} {len(protein_quant_ratios)}")
         time.sleep(0.1)
-        protein_file = os.path.join(args.output_folder, 'protein_ratios.parquet')
+
         cols, data = get_peptide_ratio_data_wide(protein_quant_ratios, args.pairs, args.groupby_filename)
         protein_df = pd.DataFrame(data, columns=cols)
 
+        protein_file = os.path.join(args.output_folder, args.protein_file + f'.{args.output_type}')
         if args.output_type == 'csv':
             protein_df.to_csv(os.path.join(args.output_folder, protein_file), index=False)
         elif args.output_type == 'parquet':
             protein_df.to_parquet(os.path.join(args.output_folder, protein_file))
-
-        # write_protein_ratios(protein_quant_ratios, protein_file, args.groupby_filename, args.ratio_function)
+        else:
+            raise ValueError(f'Invalid output type: {args.output_type}')
         print(f'Protein Ratios written to {protein_file}')
         print()
+
         del protein_quant_ratios
         del protein_df
         del data
