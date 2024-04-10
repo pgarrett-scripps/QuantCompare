@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools"]
+
+[project]
+name = "quantcompare"
+authors = [
+    {name = "Patrick Garrett", email = "pgarrett@scripps.edu"},
+]
+description = "Simple tool to compare sage quant results!"
+readme = "README.md"
+requires-python = ">=3.9"
+dynamic = ["version"]
+license = {file = "LICENSE"}
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "pandas",
+    "argparse",
+    "numpy",
+    "tqdm",
+    "scipy",
+    "statsmodels",
+    "setuptools"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[project.scripts]
+compare = "quantcompare.main:run"
+
+[tool.setuptools.dynamic]
+version = {attr = "quantcompare.__version__"}
