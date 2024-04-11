@@ -22,27 +22,7 @@ warnings.filterwarnings('ignore', category=RuntimeWarning,
 np.seterr(divide='ignore', invalid='ignore')
 
 
-def ratio_uncertainty(mu_A: float, sigma_A: float, mu_B: float, sigma_B: float) -> float:
-    """
-    Calculate the uncertainty (standard deviation) of a ratio of two measurements.
-
-    Parameters:
-    mu_A (float): Mean of the numerator measurement.
-    sigma_A (float): Standard deviation of the numerator measurement.
-    mu_B (float): Mean of the denominator measurement.
-    sigma_B (float): Standard deviation of the denominator measurement.
-
-    Returns:
-    float: The uncertainty (standard deviation) of the ratio measurement.
-    """
-    # Calculate the variance of the ratio
-    variance_ratio = np.divide(sigma_A, mu_A) ** 2 + np.divide(sigma_B, mu_B) ** 2
-
-    # Return the standard deviation of the ratio (sqrt of variance)
-    return np.sqrt(variance_ratio)
-
-
-def sum_uncertainty(*std_devs: float) -> float:
+def sum_uncertainty(*std_devs: np.ndarray) -> np.ndarray:
     """
     Calculate the uncertainty (standard deviation) of the sum of multiple values.
 
@@ -59,7 +39,7 @@ def sum_uncertainty(*std_devs: float) -> float:
     return np.sqrt(variance_sum)
 
 
-def log2_transformed_uncertainty(ratio: float, ratio_std: float) -> float:
+def log2_transformed_uncertainty(ratio: np.ndarray, ratio_std: np.ndarray) -> np.ndarray:
     """
     Calculate the uncertainty (standard deviation) of the log2-transformed value of a given ratio.
 
@@ -78,7 +58,7 @@ def log2_transformed_uncertainty(ratio: float, ratio_std: float) -> float:
     return log2_uncertainty
 
 
-def mean_uncertainty(*std_devs: float) -> float:
+def mean_uncertainty(*std_devs: np.ndarray) -> np.ndarray:
     """
     Calculate the uncertainty (standard deviation) of the mean of multiple values.
 
@@ -96,7 +76,8 @@ def mean_uncertainty(*std_devs: float) -> float:
     return np.sqrt(variance_mean)
 
 
-def divide_uncertainty(numerator: float, numerator_std: float, denominator: float, denominator_std: float) -> float:
+def divide_uncertainty(numerator: np.ndarray, numerator_std: np.ndarray, denominator: np.ndarray,
+                       denominator_std: np.ndarray) -> np.ndarray:
     """
     Calculate the uncertainty (standard deviation) of the division of two measurements.
 
@@ -148,44 +129,6 @@ def group_intensities(intensities: np.ndarray, groups: Dict[Any, List[int]]) -> 
     for _, indices in groups.items():
         grouped_intensities.append(intensities[:, indices])
     return grouped_intensities
-
-
-def make_quant_groups_old(df: pd.DataFrame, groups: Dict[Any, List[int]], normalize: bool = True) -> List[QuantGroup]:
-    quant_groups = []
-
-    # Group the DataFrame by 'filename'
-    for filename, group_df in df.groupby('filename'):
-
-        intensities = np.vstack(group_df['reporter_ion_intensity'].values, dtype=np.float32)
-
-        if normalize:
-            sums = np.sum(intensities, axis=0)
-            average_sum = np.mean(sums)
-            norm_intensities = intensities / sums * average_sum
-        else:
-            norm_intensities = intensities
-
-        """
-        group_average_sums = np.zeros(sums.shape)
-        for group, indices in groups.items():
-            group_sums = sums[indices]
-            group_average_sum = np.mean(group_sums)
-            group_average_sums[indices] = group_average_sum
-        norm_intensities = intensities / sums * group_average_sums
-        """
-
-        # Create Psm objects for each row in the group
-        psms = [Psm(row['peptide'], row['charge'], row['filename'], row['proteins'], row['scannr'], intensities[i],
-                    norm_intensities[i])
-                for i, row in group_df.iterrows()]
-
-        # Create QuantGroup objects for each Psm and associated groups
-        for psm in psms:
-            for group, indices in groups.items():
-                # Assuming you need to select the intensities by the indices here; otherwise, adjust accordingly.
-                quant_groups.append(QuantGroup(group, indices, psm))
-
-    return quant_groups
 
 
 def make_quant_groups(df: pd.DataFrame, groups: Dict[Any, List[int]], normalize: bool = True) -> List[QuantGroup]:
@@ -244,68 +187,34 @@ def calculate_p_value(mean, std_dev, n):
     return p_value
 
 
-def simple_sum_ratio(arr1: np.array, arr2: np.array) -> Tuple[float, float, float, float, float]:
-    # Simply sums the intensities of each group and returns the ratio (No pvalue)
-
-    # Calculate the mean of each row
-    group1_mean = np.mean(arr1, axis=1)
-    group2_mean = np.mean(arr2, axis=1)
-
-    # Calculate the uncertainty of each row
-    group1_uncertainty = np.std(arr1, axis=1)
-    group2_uncertainty = np.std(arr2, axis=1)
+def simple_sum_ratio_zscore(arr1: np.array, arr2: np.array) -> Tuple[float, float, float]:
+    # Simply sums the intensities of each group and returns the ratio
+    group1_mean, group1_std = np.mean(arr1, axis=1), np.std(arr1, axis=1)
+    group2_mean, group2_std = np.mean(arr2, axis=1), np.std(arr2, axis=1)
 
     # take the sum of the means
-    group1_mean = np.sum(group1_mean)
-    group2_mean = np.sum(group2_mean)
-
-    # take the sum of the uncertainties
-    group1_uncertainty = np.sum(group1_uncertainty)
-    group2_uncertainty = np.sum(group2_uncertainty)
-
-    ratio = np.divide(group1_mean, group2_mean)
-    ratio_std = ratio_uncertainty(group1_mean, group1_uncertainty, group2_mean, group2_uncertainty)
-    log2_ratio = np.log2(ratio)
-    log2_std = log2_transformed_uncertainty(ratio, ratio_std)
-
-    return log2_ratio, log2_std, np.nan
-
-
-def colum_sum_ratio(arr1: np.array, arr2: np.array) -> Tuple[float, float, float, float, float]:
-    # Sums the intensities of each column and returns the ratio
-
-    group1_sums = np.sum(arr1, axis=0)
-    group2_sums = np.sum(arr2, axis=0)
-
-    group1_mean = np.mean(group1_sums)
-    group2_mean = np.mean(group2_sums)
-
-    ratio = np.divide(group1_mean, group2_mean)
-    pvalue = stats.ttest_ind(group1_sums, group2_sums)[1]
-
-    group1_std = np.std(group1_sums)
-    group2_std = np.std(group2_sums)
-
-    std = ratio_uncertainty(group1_mean, group1_std, group2_mean, group2_std)
-
-    log2_ratio = np.log2(ratio)
-    log2_std = log2_transformed_uncertainty(ratio, std)
-
-    return log2_ratio, log2_std, pvalue
-
-
-def row_mean_ratio(arr1: np.array, arr2: np.array) -> Tuple[float, float, float, float, float]:
-    # Calculate the mean of each row
-    group1_means = np.mean(arr1, axis=1)
-    group2_means = np.mean(arr2, axis=1)
-
-    # Calculate the uncertainty of each row
-    group1_std = np.std(group1_means)
-    group2_std = np.std(group2_means)
+    group1_mean, group1_mean_std = np.sum(group1_mean), sum_uncertainty(*group1_std)
+    group2_mean, group2_mean_std = np.sum(group2_mean), sum_uncertainty(*group2_std)
 
     # Calculate the ratio of the means and the uncertainties
-    ratios = group1_means / group2_means
-    ratio_uncertainties = ratio_uncertainty(group1_means, group1_std, group2_means, group2_std)
+    ratio, ratio_std = np.divide(group1_mean, group2_mean), divide_uncertainty(group1_mean, group1_mean_std,
+                                                                               group2_mean, group2_mean_std)
+    log2_ratio, log2_std = np.log2(ratio), log2_transformed_uncertainty(ratio, ratio_std)
+
+    log2_ratio_zscore = (log2_ratio - 0) / log2_std
+    log2_ratio_zscore_pvalue = stats.norm.sf(np.abs(log2_ratio_zscore)) * 2
+
+    return log2_ratio, log2_std, log2_ratio_zscore_pvalue
+
+
+def simple_sum_ratio_ttest_1samp(arr1: np.array, arr2: np.array) -> Tuple[float, float, float, float, float]:
+    # Calculate the mean of each row
+    group1_mean, group1_std = np.mean(arr1, axis=1), np.std(arr1, axis=1)
+    group2_mean, group2_std = np.mean(arr2, axis=1), np.std(arr2, axis=1)
+
+    # Calculate the ratio of the means and the uncertainties
+    ratios = group1_mean / group2_mean
+    ratio_uncertainties = divide_uncertainty(group1_mean, group1_std, group2_mean, group2_std)
 
     # Calculate the log2 of the ratios and the uncertainties
     log2_ratios = np.log2(ratios)
@@ -317,20 +226,29 @@ def row_mean_ratio(arr1: np.array, arr2: np.array) -> Tuple[float, float, float,
 
     pvalue = stats.ttest_1samp(log2_ratios, 0)[1]
 
-    # ratio = np.mean(ratios)
-    # pvalue = stats.ttest_ind(group1_means, group2_means)[1]
+    return log2_ratio, log2_std, pvalue
 
-    # stds = ratio_uncertainty(group1_means, group1_std, group2_means, group2_std)
-    # std = sum_uncertainty(*stds)
 
-    # log2_ratios = np.log2(ratios)
-    # log2_ratio = np.mean(log2_ratios)
-    # log2_std = log2_transformed_uncertainty(ratio, std)
+def colum_sum_ratio(arr1: np.array, arr2: np.array) -> Tuple[float, float, float]:
+    # Sums the intensities of each column and returns the ratio
+
+    group1_sums = np.sum(arr1, axis=0)
+    group2_sums = np.sum(arr2, axis=0)
+
+    group1_mean, group1_std = np.mean(group1_sums), np.std(group1_sums)
+    group2_mean, group2_std = np.mean(group2_sums), np.std(group2_sums)
+
+    ratio = np.divide(group1_mean, group2_mean)
+    std = divide_uncertainty(group1_mean, group1_std, group2_mean, group2_std)
+
+    pvalue = stats.ttest_ind(group1_sums, group2_sums)[1]
+    log2_ratio = np.log2(ratio)
+    log2_std = log2_transformed_uncertainty(ratio, std)
 
     return log2_ratio, log2_std, pvalue
 
 
-def row_mean_ratio2(arr1: np.array, arr2: np.array, inf_replacement: float = 100) -> Tuple[float, float, float]:
+def reference_mean_ratio_rollup(arr1: np.array, arr2: np.array, inf_replacement: float = 100) -> Tuple[float, float, float]:
     """
     Calculate the ratio of the mean of each row of two arrays.
 
@@ -338,19 +256,41 @@ def row_mean_ratio2(arr1: np.array, arr2: np.array, inf_replacement: float = 100
 
         >>> arr1 = np.array([[100, 110, 105], [200, 210, 205]])
         >>> arr2 = np.array([[200, 230, 240, 200], [400, 430, 440, 410]])
-        >>> row_mean_ratio2(arr1, arr2)
+        >>> reference_mean_ratio_rollup(arr1, arr2)
         (-0.09307656849087903, 2.5476488778079367, 0.9205955813892215)
 
         >>> arr1 = np.array([[0, 0, 0], [200, 210, 205]])
         >>> arr2 = np.array([[200, 230, 240, 0], [400, 430, 440, 0]])
-        >>> row_mean_ratio2(arr1, arr2)
+        >>> reference_mean_ratio_rollup(arr1, arr2)
         (-inf, nan, nan)
 
     """
 
-    # Calculate the mean of each row
-    group1_means = np.mean(arr1, axis=1).reshape(-1, 1)
+    # Calculate the mean of group1
+    group1_means, group1_stds = np.mean(arr1, axis=1).reshape(-1, 1), np.std(arr1, axis=1).reshape(-1, 1)
+
+    # Calculate the ratios
     ratios = np.divide(group1_means, arr2)
+    ratios_std = divide_uncertainty(group1_means, group1_stds, arr2, np.zeros_like(arr2))
+
+    # Calculate the log2 of the ratios and the uncertainties
+    log2_ratios = np.log2(ratios)
+    log2_ratio_uncertainties = log2_transformed_uncertainty(ratios, ratios_std)
+
+    # get index of positive and negative infinities and nan
+    pos_inf_idx = np.isposinf(log2_ratios)
+    neg_inf_idx = np.isneginf(log2_ratios)
+    nan_idx = np.isnan(log2_ratios)
+
+    # replace positive infinities with inf_replacement, and uncertainties with 1/10 of the replacement
+    log2_ratios[pos_inf_idx] = inf_replacement
+    log2_ratio_uncertainties[pos_inf_idx] = inf_replacement // 10
+    # replace negative infinities with -inf_replacement, and uncertainties with 1/10 of the replacement
+    log2_ratios[neg_inf_idx] = -inf_replacement
+    log2_ratio_uncertainties[neg_inf_idx] = inf_replacement // 10
+    # replace nan with 0, and uncertainties with 1/10 of the replacement
+    log2_ratios[nan_idx] = 0
+    log2_ratio_uncertainties[nan_idx] = inf_replacement // 10
 
     # remove nans
     ratios = ratios[~np.isnan(ratios)]
@@ -367,17 +307,15 @@ def row_mean_ratio2(arr1: np.array, arr2: np.array, inf_replacement: float = 100
     # Replace negative infinities
     log2_ratios[np.isneginf(log2_ratios)] = -inf_replacement
 
+    # Calculate the mean of the log2 ratios and uncertainties
     log2_ratio = np.mean(log2_ratios)
-    log2_std = np.std(log2_ratios)
-    pvalue = calculate_p_value(log2_ratio, log2_std, len(log2_ratios))
+    log2_std = mean_uncertainty(*log2_ratio_uncertainties)[0]
+    pvalue = calculate_p_value(log2_ratio, log2_std, len(log2_ratios) * min(arr1.shape[1], arr2.shape[1]))
 
-    # (-1.0397599262262949, 0.09217491211415327, 7.681709918256204e-09)
-    return log2_ratio, log2_std, pvalue
-
+    return float(log2_ratio), float(log2_std), float(pvalue)
 
 
-
-def row_mean_ratio3(arr1: np.array, arr2: np.array, inf_replacement: float = 100) -> Tuple[float, float, float]:
+def mean_ratio_rollup(arr1: np.array, arr2: np.array, inf_replacement: float = 100) -> Tuple[float, float, float]:
     """
     Calculate the ratio of the mean of each row of two arrays.
 
@@ -385,70 +323,26 @@ def row_mean_ratio3(arr1: np.array, arr2: np.array, inf_replacement: float = 100
 
         >>> arr1 = np.array([[100, 110, 105], [200, 210, 205]])
         >>> arr2 = np.array([[200, 230, 240, 200], [400, 430, 440, 410]])
-        >>> row_mean_ratio3(arr1, arr2)
-        (-1.0426957456153223, 0.07236359360185755, 3.43566121759087e-07)
-
-    """
-
-    from uncertainties import umath, unumpy
-
-    # Calculate the mean of each row
-    group1_means = np.mean(arr1, axis=1).reshape(-1, 1)
-    group2_means = np.mean(arr2, axis=1).reshape(-1, 1)
-    group1_stds = np.std(arr1, axis=1).reshape(-1, 1)
-    group2_stds = np.std(arr2, axis=1).reshape(-1, 1)
-
-    group1_unumpy = unumpy.umatrix(group1_means, group1_stds)
-    group2_unumpy = unumpy.umatrix(group2_means, group2_stds)
-
-    ratios = np.divide(group1_unumpy, group2_unumpy)
-    # [[0.4827586206896552+/-0.043848001378261045]
-    #      [0.4880952380952381+/-0.020787487928129334]]
-
-    log_ratios = unumpy.log(ratios)
-    log_ratio = np.mean(log_ratios)
-
-    log2_ratio = log_ratio / np.log(2)
-
-    log2_ratio_value = log2_ratio.nominal_value
-    log2_ratio_std = log2_ratio.std_dev
-
-    zscore = log2_ratio.std_score(0)
-    pvalue = stats.norm.sf(zscore) * 2
-
-    #pvalue = calculate_p_value(log2_ratio_value, log2_ratio_std, len(log_ratios)*min(arr1.shape[1], arr2.shape[1]))
-
-    return log2_ratio_value, log2_ratio_std, pvalue
-
-
-def row_mean_ratio4(arr1: np.array, arr2: np.array, inf_replacement: float = 100) -> Tuple[float, float, float]:
-    """
-    Calculate the ratio of the mean of each row of two arrays.
-
-    .. code-block:: python
-
-        >>> arr1 = np.array([[100, 110, 105], [200, 210, 205]])
-        >>> arr2 = np.array([[200, 230, 240, 200], [400, 430, 440, 410]])
-        >>> row_mean_ratio4(arr1, arr2)
+        >>> mean_ratio_rollup(arr1, arr2)
         (-1.0426957456153223, 0.07236359360185755, 3.43566121759087e-07)
 
 
         >>> arr1 = np.array([[0, 0, 0], [200, 210, 205], [0, 0, 0]])
         >>> arr2 = np.array([[200, 230, 240, 200], [0, 0, 0, 0], [0, 0, 0, 0]])
-        >>> row_mean_ratio4(arr1, arr2)
+        >>> mean_ratio_rollup(arr1, arr2)
         (-1.0426957456153223, 0.07236359360185755, 3.43566121759087e-07)
 
     """
 
-    # Calculate the mean of each row
-    group1_means = np.mean(arr1, axis=1).reshape(-1, 1)
-    group2_means = np.mean(arr2, axis=1).reshape(-1, 1)
-    group1_stds = np.std(arr1, axis=1).reshape(-1, 1)
-    group2_stds = np.std(arr2, axis=1).reshape(-1, 1)
+    # Calculate the means and standard deviations of group of reporter ions
+    group1_means, group1_stds = np.mean(arr1, axis=1).reshape(-1, 1), np.std(arr1, axis=1).reshape(-1, 1)
+    group2_means, group2_stds = np.mean(arr2, axis=1).reshape(-1, 1), np.std(arr2, axis=1).reshape(-1, 1)
 
+    # Calculate the ratios and uncertainties
     ratios = np.divide(group1_means, group2_means)
     ratio_uncertainties = divide_uncertainty(group1_means, group1_stds, group2_means, group2_stds)
 
+    # Calculate the log2 of the ratios and the uncertainties
     log2_ratios = np.log2(ratios)
     log2_ratio_uncertainties = log2_transformed_uncertainty(ratios, ratio_uncertainties)
 
@@ -457,54 +351,22 @@ def row_mean_ratio4(arr1: np.array, arr2: np.array, inf_replacement: float = 100
     neg_inf_idx = np.isneginf(log2_ratios)
     nan_idx = np.isnan(log2_ratios)
 
-    # replace positive infinities
+    # replace positive infinities with inf_replacement, and uncertainties with 1/10 of the replacement
     log2_ratios[pos_inf_idx] = inf_replacement
-    log2_ratio_uncertainties[pos_inf_idx] = inf_replacement//10
-    # replace negative infinities
+    log2_ratio_uncertainties[pos_inf_idx] = inf_replacement // 10
+    # replace negative infinities with -inf_replacement, and uncertainties with 1/10 of the replacement
     log2_ratios[neg_inf_idx] = -inf_replacement
-    log2_ratio_uncertainties[neg_inf_idx] = inf_replacement//10
-    # replace nan with 0
+    log2_ratio_uncertainties[neg_inf_idx] = inf_replacement // 10
+    # replace nan with 0, and uncertainties with 1/10 of the replacement
     log2_ratios[nan_idx] = 0
-    log2_ratio_uncertainties[nan_idx] = inf_replacement//10
+    log2_ratio_uncertainties[nan_idx] = inf_replacement // 10
 
+    # Calculate the mean of the log2 ratios and uncertainties
     log2_ratio = np.mean(log2_ratios)
     log2_std = mean_uncertainty(*log2_ratio_uncertainties)[0]
-    pvalue = calculate_p_value(log2_ratio, log2_std, len(log2_ratios)*min(arr1.shape[1], arr2.shape[1]))
+    pvalue = calculate_p_value(log2_ratio, log2_std, len(log2_ratios) * min(arr1.shape[1], arr2.shape[1]))
 
-    return log2_ratio, log2_std, pvalue
-
-
-def row_flatten_ratio(arr1: np.array, arr2: np.array) -> Tuple[float, float, float, float, float]:
-    # normalize the intensities by the rows max value
-
-    # find the max value of each group for each row
-    group1_max = np.max(arr1, axis=1)
-    group2_max = np.max(arr2, axis=1)
-    group_max = np.maximum(group1_max, group2_max)
-
-    # normalize the intensities by the max value
-    group1_norm_intensities = arr1 / group_max
-    group2_norm_intensities = arr2 / group_max
-
-    # Now that all values are normalized, we can flatten the arrays
-    group1_flatten = group1_norm_intensities.flatten()
-    group2_flatten = group2_norm_intensities.flatten()
-
-    group1_mean = np.mean(group1_flatten)
-    group2_mean = np.mean(group2_flatten)
-
-    ratio = group1_mean / group2_mean
-    pvalue = stats.ttest_ind(group1_flatten, group2_flatten)[1]
-
-    group1_std = np.std(group1_flatten)
-    group2_std = np.std(group2_flatten)
-
-    std = ratio_uncertainty(group1_mean, group1_std, group2_mean, group2_std)
-
-    log2_ratio = np.log2(ratio)
-    log2_std = log2_transformed_uncertainty(ratio, std)
-
-    return log2_ratio, log2_std, pvalue
+    return float(log2_ratio), float(log2_std), float(pvalue)
 
 
 @dataclass()
@@ -650,54 +512,6 @@ class GroupRatio:
         return len(self.QuantGroup1)
 
 
-def get_psm_ratio_data_long(quant_ratios: List[GroupRatio], groupby_filename: bool,
-                            ratio_function: str) -> (List[str], List[List[Any]]):
-    columns = ['peptide', 'charge', 'filename', 'groups', 'intensities', 'norm_intensities', 'total_intensity',
-               'total_norm_intensity', 'log2_ratio', 'log2_ratio_std', 'pvalue', 'norm_log2_ratio',
-               'norm_log2_ratio_std',
-               'norm_pvalue', 'cnt']
-
-    if not groupby_filename:
-        columns.remove('filename')
-
-    column_indices = {col: i for i, col in enumerate(columns)}
-
-    datas = []
-    for quant_ratio in tqdm.tqdm(quant_ratios, desc='Calculating Psm Ratios'):
-
-        data = [None] * len(columns)
-        data[column_indices['peptide']] = quant_ratio.QuantGroup1[0].psm.peptide
-        data[column_indices['charge']] = quant_ratio.QuantGroup1[0].psm.charge
-
-        if groupby_filename:
-            data[column_indices['filename']] = quant_ratio.QuantGroup1[0].psm.filename
-
-        data[column_indices['groups']] = (quant_ratio.group1, quant_ratio.group2)
-
-        data[column_indices['intensities']] = \
-            (quant_ratio.group1_intensity, quant_ratio.group2_intensity)
-        data[column_indices['norm_intensities']] = \
-            (quant_ratio.group1_norm_intensity, quant_ratio.group2_norm_intensity)
-        data[column_indices['total_intensity']] = \
-            (quant_ratio.group1_total_intensity, quant_ratio.group2_total_intensity)
-        data[column_indices['total_norm_intensity']] = \
-            (quant_ratio.group1_total_norm_intensity, quant_ratio.group2_total_norm_intensity)
-
-        data[column_indices['log2_ratio']] = quant_ratio.log2_ratio
-        data[column_indices['log2_ratio_std']] = quant_ratio.log2_ratio_pvalue
-        data[column_indices['pvalue']] = quant_ratio.log2_ratio_pvalue
-
-        data[column_indices['norm_log2_ratio']] = quant_ratio.log2_norm_ratio
-        data[column_indices['norm_log2_ratio_std']] = quant_ratio.log2_norm_ratio_std
-        data[column_indices['norm_pvalue']] = quant_ratio.log2_norm_ratio_pvalue
-
-        data[column_indices['cnt']] = len(quant_ratio)
-
-        datas.append(data)
-
-    return columns, datas
-
-
 def get_psm_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, Any]], groupby_filename: bool) -> \
         (List[str], List[List[Any]]):
     if groupby_filename:
@@ -752,32 +566,32 @@ def _get_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, 
     for key in pair_keys:
         columns.extend(
             [
-                 f'intensities_{key}',
-                 f'total_intensity_{key}',
-                 f'average_intensity_{key}',
-                 f'norm_intensities_{key}',
-                 f'total_norm_intensity_{key}',
-                 f'average_norm_intensity_{key}'
-             ]
+                f'intensities_{key}',
+                f'total_intensity_{key}',
+                f'average_intensity_{key}',
+                f'norm_intensities_{key}',
+                f'total_norm_intensity_{key}',
+                f'average_norm_intensity_{key}'
+            ]
         )
     for pair in pairs:
         columns.extend(
             [
-                 f'ratio_{pair[0]}_{pair[1]}',
-                 f'centered_ratio_{pair[0]}_{pair[1]}',
-                 f'log2_ratio_{pair[0]}_{pair[1]}',
-                 f'centered_log2_ratio_{pair[0]}_{pair[1]}',
-                 f'log2_ratio_std_{pair[0]}_{pair[1]}',
-                 f'log2_ratio_pvalue_{pair[0]}_{pair[1]}',
-                 f'log2_ratio_qvalue_{pair[0]}_{pair[1]}',
-                 f'norm_ratio_{pair[0]}_{pair[1]}',
-                 f'centered_norm_ratio_{pair[0]}_{pair[1]}',
-                 f'norm_log2_ratio_{pair[0]}_{pair[1]}',
-                 f'centered_norm_log2_ratio_{pair[0]}_{pair[1]}',
-                 f'norm_log2_ratio_std_{pair[0]}_{pair[1]}',
-                 f'norm_log2_pvalue_{pair[0]}_{pair[1]}',
-                 f'norm_log2_qvalue_{pair[0]}_{pair[1]}',
-             ]
+                f'ratio_{pair[0]}_{pair[1]}',
+                f'centered_ratio_{pair[0]}_{pair[1]}',
+                f'log2_ratio_{pair[0]}_{pair[1]}',
+                f'centered_log2_ratio_{pair[0]}_{pair[1]}',
+                f'log2_ratio_std_{pair[0]}_{pair[1]}',
+                f'log2_ratio_pvalue_{pair[0]}_{pair[1]}',
+                f'log2_ratio_qvalue_{pair[0]}_{pair[1]}',
+                f'norm_ratio_{pair[0]}_{pair[1]}',
+                f'centered_norm_ratio_{pair[0]}_{pair[1]}',
+                f'norm_log2_ratio_{pair[0]}_{pair[1]}',
+                f'centered_norm_log2_ratio_{pair[0]}_{pair[1]}',
+                f'norm_log2_ratio_std_{pair[0]}_{pair[1]}',
+                f'norm_log2_pvalue_{pair[0]}_{pair[1]}',
+                f'norm_log2_qvalue_{pair[0]}_{pair[1]}',
+            ]
         )
     columns.append('cnt')
 
@@ -785,33 +599,33 @@ def _get_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, 
     quant_ratios.sort(key=groupby_func)
     for key, group in tqdm.tqdm(groupby(quant_ratios, groupby_func), desc='Generating Wide Data'):
         data = []
-        key_dict = {}
-        pair_dict = {}
+        group_to_intensities = {}
+        pair_to_ratio_data = {}
         cnt = 0
         for quant_ratio in group:
             cnt += 1
-            pair_dict[(quant_ratio.QuantGroup1[0].group, quant_ratio.QuantGroup2[0].group)] = \
+            pair_to_ratio_data[(quant_ratio.QuantGroup1[0].group, quant_ratio.QuantGroup2[0].group)] = \
                 (
-                     quant_ratio.ratio,
-                     quant_ratio.centered_ratio,
-                     quant_ratio.log2_ratio,
-                     quant_ratio.centered_log2_ratio,
-                     quant_ratio.log2_ratio_std,
-                     quant_ratio.log2_ratio_pvalue,
-                     quant_ratio.qvalue,
-                     quant_ratio.norm_ratio,
-                     quant_ratio.centered_norm_ratio,
-                     quant_ratio.log2_norm_ratio,
-                     quant_ratio.centered_norm_log2_ratio,
-                     quant_ratio.log2_norm_ratio_std,
-                     quant_ratio.log2_norm_ratio_pvalue,
-                     quant_ratio.norm_qvalue,
+                    quant_ratio.ratio,
+                    quant_ratio.centered_ratio,
+                    quant_ratio.log2_ratio,
+                    quant_ratio.centered_log2_ratio,
+                    quant_ratio.log2_ratio_std,
+                    quant_ratio.log2_ratio_pvalue,
+                    quant_ratio.qvalue,
+                    quant_ratio.norm_ratio,
+                    quant_ratio.centered_norm_ratio,
+                    quant_ratio.log2_norm_ratio,
+                    quant_ratio.centered_norm_log2_ratio,
+                    quant_ratio.log2_norm_ratio_std,
+                    quant_ratio.log2_norm_ratio_pvalue,
+                    quant_ratio.norm_qvalue,
                 )
 
             g1, g2 = quant_ratio.group1, quant_ratio.group2
 
-            if g1 not in key_dict:
-                key_dict[g1] = (
+            if g1 not in group_to_intensities:
+                group_to_intensities[g1] = (
                     quant_ratio.group1_intensity,
                     quant_ratio.group1_total_intensity,
                     quant_ratio.group1_average_intensity,
@@ -819,8 +633,8 @@ def _get_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, 
                     quant_ratio.group1_total_norm_intensity,
                     quant_ratio.group1_norm_average_intensity)
 
-            if g2 not in key_dict:
-                key_dict[g2] = (
+            if g2 not in group_to_intensities:
+                group_to_intensities[g2] = (
                     quant_ratio.group2_intensity,
                     quant_ratio.group2_total_intensity,
                     quant_ratio.group2_average_intensity,
@@ -829,19 +643,19 @@ def _get_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, 
                     quant_ratio.group2_norm_average_intensity)
 
         if isinstance(key, tuple):
-            for k in key:
-                data.append(k)
+            for val in key:
+                data.append(val)
         else:
-            data.append(key)
+            data.append(key)  # For case where grouby key is a single value: 'peptide' or 'proteins'
 
         if 'filename' in columns:
             data.append(key[2])
 
-        for key in pair_keys:
-            data.extend(key_dict[key])
+        for pair_key in pair_keys:
+            data.extend(group_to_intensities[pair_key])
 
         for pair in pairs:
-            data.extend(pair_dict[pair])
+            data.extend(pair_to_ratio_data[pair])
 
         data.append(cnt)
 
@@ -1056,11 +870,14 @@ def parse_args():
                         help='Input parquet file. Must contain the following columns: "reporter_ion_intensity", "filename", "peptide", "charge", "proteins", and "scannr"')
     parser.add_argument('output_folder',
                         help='Output folder for writing output files to. This folder will be created if it does not exist. File names can be specified with the --psm_file and --peptide_file and --protein_file arguments.')
-    parser.add_argument('--psm_file', help='The file name for the psms ratios file, will be inside the output_folder dir.',
+    parser.add_argument('--psm_file',
+                        help='The file name for the psms ratios file, will be inside the output_folder dir.',
                         default='psm_ratios')
-    parser.add_argument('--peptide_file', help='The file name for the peptide ratios file, will be inside the output_folder dir.',
+    parser.add_argument('--peptide_file',
+                        help='The file name for the peptide ratios file, will be inside the output_folder dir.',
                         default='peptide_ratios')
-    parser.add_argument('--protein_file', help='The file name for the protein ratios file, will be inside the output_folder dir.',
+    parser.add_argument('--protein_file',
+                        help='The file name for the protein ratios file, will be inside the output_folder dir.',
                         default='protein_ratios')
 
     def parse_pairs(arg):
@@ -1099,11 +916,18 @@ def parse_args():
     parser.add_argument('--no_psms', action='store_true', help='Dont output a PSM ratio file.')
     parser.add_argument('--no_peptides', action='store_true', help='Dont output a Peptide ratio file.')
     parser.add_argument('--no_proteins', action='store_true', help='Dont output a Protein ratio file.')
-    parser.add_argument('--center', choices=['mean', 'median'], default='median', help='Center the Log2 Ratios around the mean/median.')
-    parser.add_argument('--max_rows', default=-1, type=int, help='(DEBUG OPTION) Maximum number of rows to read from the input file. Default is -1 (read all rows).')
-    parser.add_argument('--ratio_function', choices=[1, 2], default=2)
-    parser.add_argument('--qvalue_filter', default=0.0, type=float, help='Filter out ratios with qvalues above this value. Default is -1 (no filter).')
-    parser.add_argument('--keep_decoy', action='store_true', help='Keep decoy proteins in the dataset.')
+    parser.add_argument('--center', choices=['mean', 'median'], default='median',
+                        help='Center the Log2 Ratios around the mean/median.')
+    parser.add_argument('--max_rows', default=-1, type=int,
+                        help='(DEBUG OPTION) Maximum number of rows to read from the input file. Default is -1 (read all rows).')
+    parser.add_argument('--ratio_function', choices=['mean_ratio_rollup', 'reference_mean_ratio_rollup'], default='mean_ratio_rollup')
+    parser.add_argument('--keep_decoy', action='store_true',
+                        help='Keep decoy proteins in the analysis. Default is to remove decoys.')
+    parser.add_argument('--keep_psm', default=1, type=int,
+                        help='Keep only the top N PSMs per scan number per file. Default is 1. Set to -1 to keep all PSMs.')
+    parser.add_argument('--qvalue_threshold', default=0.01, type=float, help='Q-value threshold for significance.')
+    parser.add_argument('--qvalue_level', choices=['peptide', 'protein', 'spectrum'], default='peptide',
+                        help='Q-value level for significance. Default is peptide.')
     return parser.parse_args()
 
 
@@ -1134,18 +958,49 @@ def run():
     else:
         sage_df = pd.read_parquet(args.input_file, engine='pyarrow')
 
+    starting_rows = len(sage_df)
+    print(f'{"Total PSMs:":<30} {starting_rows}')
+
     # Remove decoys "is_decoy" column
     if not args.keep_decoy:
         sage_df = sage_df[~sage_df['is_decoy']].reset_index()
 
+    print(f'{"Filtered PSMs (Decoy):":<30} {starting_rows - len(sage_df)}')
+    starting_rows = len(sage_df)
+
+    if args.qvalue_level == 'peptide':
+        qvalue_col = 'peptide_q'
+    elif args.qvalue_level == 'protein':
+        qvalue_col = 'protein_q'
+    elif args.qvalue_level == 'spectrum':
+        qvalue_col = 'spectrum_q'
+    else:
+        raise ValueError(f'Invalid qvalue level: {args.qvalue_level}')
+
+    # filter by qvalue
+    sage_df = sage_df[sage_df[qvalue_col] <= args.qvalue_threshold].reset_index()
+
+    print(f'{"Filtered PSMs (Qvalue):":<30} {starting_rows - len(sage_df)}')
+    starting_rows = len(sage_df)
+
+    # sort sage_df by scannr and filename
+    sage_df.sort_values(['scannr', 'filename', 'rank'], ascending=[True, True, True], inplace=True)
+
+    # drop duplicates (keep args.keep_psm top PSMs per scan number per file)
+    if args.keep_psm > 0:
+        sage_df = sage_df.groupby(['scannr', 'filename']).head(args.keep_psm)
+
+    print(f'{"Filtered PSMs (Chimeric):":<30} {starting_rows - len(sage_df)}')
+    print(f'{"Remaining PSMs:":<30} {len(sage_df)}')
+
     quant_groups = make_quant_groups(sage_df, args.groups)
-    print(f"{'Loaded Quant Groups:':<20} {len(quant_groups)}")
+    print(f"{'Total Quant Groups:':<30} {len(quant_groups)}")
     print()
 
-    if args.ratio_function == 1:
-        ratio_function = partial(row_mean_ratio2, inf_replacement=100)
-    elif args.ratio_function == 2:
-        ratio_function = partial(row_mean_ratio4, inf_replacement=100)
+    if args.ratio_function == 'mean_ratio_rollup':
+        ratio_function = partial(mean_ratio_rollup, inf_replacement=100)
+    elif args.ratio_function == 'reference_mean_ratio_rollup':
+        ratio_function = partial(reference_mean_ratio_rollup, inf_replacement=100)
     else:
         raise ValueError(f'Invalid ratio function: {args.ratio_function}')
 
@@ -1154,8 +1009,6 @@ def run():
         psm_quant_ratios = group_by_psms(quant_groups, args.pairs, args.groupby_filename, ratio_function)
         assign_qvalues(psm_quant_ratios)
         assign_centered_log2_ratios(psm_quant_ratios, args.center, args.inf_replacement)
-        # filter out ratios with qvalues above the threshold
-        psm_quant_ratios = [qr for qr in psm_quant_ratios if qr.qvalue <= args.qvalue_filter]
         print(f"{'PSM Quant Groups:':<20} {len(psm_quant_ratios)}")
         time.sleep(0.1)
 
@@ -1181,8 +1034,6 @@ def run():
         peptide_quant_ratios = group_by_peptides(quant_groups, args.pairs, args.groupby_filename, ratio_function)
         assign_qvalues(peptide_quant_ratios)
         assign_centered_log2_ratios(peptide_quant_ratios, args.center, args.inf_replacement)
-        # filter out ratios with qvalues above the threshold
-        peptide_quant_ratios = [qr for qr in peptide_quant_ratios if qr.qvalue <= args.qvalue_filter]
         print(f"{'Peptide Quant Groups:':<20} {len(peptide_quant_ratios)}")
         time.sleep(0.1)
 
@@ -1209,8 +1060,6 @@ def run():
         protein_quant_ratios = group_by_proteins(quant_groups, args.pairs, args.groupby_filename, ratio_function)
         assign_qvalues(protein_quant_ratios)
         assign_centered_log2_ratios(protein_quant_ratios, args.center, args.inf_replacement)
-        # filter out ratios with qvalues above the threshold
-        protein_quant_ratios = [qr for qr in protein_quant_ratios if qr.qvalue <= args.qvalue_filter]
         print(f"{'Protein Quant Groups:':<20} {len(protein_quant_ratios)}")
         time.sleep(0.1)
 
