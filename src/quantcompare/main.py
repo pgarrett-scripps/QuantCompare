@@ -151,6 +151,8 @@ def make_quant_groups_old(df: pd.DataFrame, groups: Dict[Any, List[int]], normal
 
 
 def make_quant_groups(df: pd.DataFrame, groups: Dict[Any, List[int]], normalize: bool = True) -> List[QuantGroup]:
+    # handle missing reporter ion intensities
+    df = df[~df.reporter_ion_intensity.isna()].reset_index()
     intensities = np.vstack(df['reporter_ion_intensity'].values).astype(np.float32)
     norm_intensities = copy.deepcopy(intensities)
 
@@ -980,9 +982,7 @@ def run():
     pprint.pprint(args_dict)
     print()
 
-    # check if args.output_folder exists
-    if not os.path.exists(args.output_folder):
-        os.makedirs(args.output_folder)
+    os.makedirs(args.output_folder, exist_ok=True)
 
     print(f'Reading Input File: {args.input_file}')
 
@@ -991,6 +991,9 @@ def run():
         sage_df = pd.read_parquet(args.input_file, engine='pyarrow').head(args.max_rows)
     else:
         sage_df = pd.read_parquet(args.input_file, engine='pyarrow')
+
+    # FDR filtering
+    sage_df = sage_df[(sage_df.spectrum_q <= 0.01) & (sage_df.peptide_q <= 0.01) & (sage_df.protein_q <= 0.01) & (~sage_df.is_decoy)]
 
     quant_groups = make_quant_groups(sage_df, args.groups)
     print(f"{'Loaded Quant Groups:':<20} {len(quant_groups)}")
@@ -1011,9 +1014,9 @@ def run():
 
         psm_file = os.path.join(args.output_folder, args.psm_file + f'.{args.output_type}')
         if args.output_type == 'csv':
-            psm_df.to_csv(os.path.join(args.output_folder, psm_file), index=False)
+            psm_df.to_csv(psm_file)
         elif args.output_type == 'parquet':
-            psm_df.to_parquet(os.path.join(args.output_folder, psm_file))
+            psm_df.to_parquet(psm_file)
         else:
             raise ValueError(f'Invalid output type: {args.output_type}')
         print(f'PSM Ratios written to {psm_file}\n')
@@ -1037,9 +1040,9 @@ def run():
 
         peptide_file = os.path.join(args.output_folder, args.peptide_file + f'.{args.output_type}')
         if args.output_type == 'csv':
-            peptide_df.to_parquet(os.path.join(args.output_folder, peptide_file))
+            peptide_df.to_csv(peptide_file)
         elif args.output_type == 'parquet':
-            peptide_df.to_parquet(os.path.join(args.output_folder, peptide_file))
+            peptide_df.to_parquet(peptide_file)
         else:
             raise ValueError(f'Invalid output type: {args.output_type}')
         print(f'Peptide Ratios written to {peptide_file}')
@@ -1059,14 +1062,14 @@ def run():
         print(f"{'Protein Quant Groups:':<20} {len(protein_quant_ratios)}")
         time.sleep(0.1)
 
-        cols, data = get_peptide_ratio_data_wide(protein_quant_ratios, args.pairs, args.groupby_filename)
+        cols, data = get_protein_ratio_data_wide(protein_quant_ratios, args.pairs, args.groupby_filename)
         protein_df = pd.DataFrame(data, columns=cols)
 
         protein_file = os.path.join(args.output_folder, args.protein_file + f'.{args.output_type}')
         if args.output_type == 'csv':
-            protein_df.to_csv(os.path.join(args.output_folder, protein_file), index=False)
+            protein_df.to_csv(protein_file)
         elif args.output_type == 'parquet':
-            protein_df.to_parquet(os.path.join(args.output_folder, protein_file))
+            protein_df.to_parquet(protein_file)
         else:
             raise ValueError(f'Invalid output type: {args.output_type}')
         print(f'Protein Ratios written to {protein_file}')
