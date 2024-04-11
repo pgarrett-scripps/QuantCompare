@@ -946,9 +946,7 @@ def run():
     pprint.pprint(args_dict)
     print()
 
-    # check if args.output_folder exists
-    if not os.path.exists(args.output_folder):
-        os.makedirs(args.output_folder)
+    os.makedirs(args.output_folder, exist_ok=True)
 
     print(f'Reading Input File...')
     sage_df = pd.read_parquet(args.input_file, engine='pyarrow')
@@ -991,6 +989,9 @@ def run():
     print(f'{"Filtered PSMs (Chimeric):":<30} {starting_rows - len(sage_df)}')
     print(f'{"Remaining PSMs:":<30} {len(sage_df)}')
     print()
+
+    # FDR filtering
+    sage_df = sage_df[(sage_df.spectrum_q <= 0.01) & (sage_df.peptide_q <= 0.01) & (sage_df.protein_q <= 0.01) & (~sage_df.is_decoy)]
 
     quant_groups = make_quant_groups(sage_df, args.groups)
     print('Creating Quant Groups...')
@@ -1063,12 +1064,12 @@ def run():
         print(f"{'Protein Quant Groups:':<20} {len(protein_quant_ratios)}")
         time.sleep(0.1)
 
-        cols, data = get_peptide_ratio_data_wide(protein_quant_ratios, args.pairs, args.groupby_filename)
+        cols, data = get_protein_ratio_data_wide(protein_quant_ratios, args.pairs, args.groupby_filename)
         protein_df = pd.DataFrame(data, columns=cols)
 
         protein_file = os.path.join(args.output_folder, args.protein_file + f'.{args.output_type}')
         if args.output_type == 'csv':
-            protein_df.to_csv(os.path.join(args.output_folder, protein_file), index=False)
+            protein_df.to_csv(protein_file)
         elif args.output_type == 'parquet':
             protein_df.to_parquet(os.path.join(args.output_folder, protein_file))
         else:
