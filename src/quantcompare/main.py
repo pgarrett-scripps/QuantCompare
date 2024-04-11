@@ -131,7 +131,7 @@ def group_intensities(intensities: np.ndarray, groups: Dict[Any, List[int]]) -> 
     return grouped_intensities
 
 
-def make_quant_groups(df: pd.DataFrame, groups: Dict[Any, List[int]], normalize: bool = True) -> List[QuantGroup]:
+def make_quant_groups(df: pd.DataFrame, groups: Dict[Any, List[int]]) -> List[QuantGroup]:
     intensities = np.vstack(df['reporter_ion_intensity'].values).astype(np.float32)
     norm_intensities = copy.deepcopy(intensities)
 
@@ -950,14 +950,13 @@ def run():
     if not os.path.exists(args.output_folder):
         os.makedirs(args.output_folder)
 
-    print(f'Reading Input File: {args.input_file}')
-
+    print(f'Reading Input File...')
+    sage_df = pd.read_parquet(args.input_file, engine='pyarrow')
     if args.max_rows > 0:
         print(f'{"Reading only the first":<20} {args.max_rows} rows')
-        sage_df = pd.read_parquet(args.input_file, engine='pyarrow').head(args.max_rows)
-    else:
-        sage_df = pd.read_parquet(args.input_file, engine='pyarrow')
+        sage_df = sage_df.head(args.max_rows).reset_index()
 
+    # Filter input data
     starting_rows = len(sage_df)
     print(f'{"Total PSMs:":<30} {starting_rows}')
 
@@ -977,23 +976,24 @@ def run():
     else:
         raise ValueError(f'Invalid qvalue level: {args.qvalue_level}')
 
-    # filter by qvalue
+    # Filter by qvalue
     sage_df = sage_df[sage_df[qvalue_col] <= args.qvalue_threshold].reset_index()
 
     print(f'{"Filtered PSMs (Qvalue):":<30} {starting_rows - len(sage_df)}')
     starting_rows = len(sage_df)
 
-    # sort sage_df by scannr and filename
-    sage_df.sort_values(['scannr', 'filename', 'rank'], ascending=[True, True, True], inplace=True)
-
     # drop duplicates (keep args.keep_psm top PSMs per scan number per file)
     if args.keep_psm > 0:
+        sage_df.sort_values(['scannr', 'filename', 'rank'], ascending=[True, True, True], inplace=True)
         sage_df = sage_df.groupby(['scannr', 'filename']).head(args.keep_psm)
+        sage_df.reset_index(drop=True, inplace=True)
 
     print(f'{"Filtered PSMs (Chimeric):":<30} {starting_rows - len(sage_df)}')
     print(f'{"Remaining PSMs:":<30} {len(sage_df)}')
+    print()
 
     quant_groups = make_quant_groups(sage_df, args.groups)
+    print('Creating Quant Groups...')
     print(f"{'Total Quant Groups:':<30} {len(quant_groups)}")
     print()
 
@@ -1005,7 +1005,7 @@ def run():
         raise ValueError(f'Invalid ratio function: {args.ratio_function}')
 
     if not args.no_psms:
-        print('Grouping by PSMs...')
+        print('Grouping PSMs...')
         psm_quant_ratios = group_by_psms(quant_groups, args.pairs, args.groupby_filename, ratio_function)
         assign_qvalues(psm_quant_ratios)
         assign_centered_log2_ratios(psm_quant_ratios, args.center, args.inf_replacement)
@@ -1022,7 +1022,7 @@ def run():
             psm_df.to_parquet(os.path.join(args.output_folder, psm_file))
         else:
             raise ValueError(f'Invalid output type: {args.output_type}')
-        print(f'PSM Ratios written to {psm_file}\n')
+        print(f'PSM Ratios written to {psm_file}')
         print()
 
         del psm_quant_ratios
@@ -1030,7 +1030,7 @@ def run():
         del data
 
     if not args.no_peptides:
-        print('Grouping by Peptides...')
+        print('Grouping Peptides...')
         peptide_quant_ratios = group_by_peptides(quant_groups, args.pairs, args.groupby_filename, ratio_function)
         assign_qvalues(peptide_quant_ratios)
         assign_centered_log2_ratios(peptide_quant_ratios, args.center, args.inf_replacement)
@@ -1055,7 +1055,7 @@ def run():
         del data
 
     if not args.no_proteins:
-        print('Grouping by Proteins...')
+        print('Grouping Proteins...')
         quant_groups = filter_quant_groups(quant_groups, args.filter)
         protein_quant_ratios = group_by_proteins(quant_groups, args.pairs, args.groupby_filename, ratio_function)
         assign_qvalues(protein_quant_ratios)
