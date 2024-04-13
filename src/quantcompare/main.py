@@ -1,19 +1,21 @@
 import copy
 import os
 import time
-from dataclasses import dataclass
-from functools import cached_property, partial
+from functools import partial
 from itertools import groupby
-from typing import Any, Dict, List, Tuple, Callable
-import argparse
+from typing import Any, Dict, List, Tuple, Callable, Set, TypeAlias, Literal
 import numpy as np
 import pprint
 import pandas as pd
 import tqdm as tqdm
-from scipy.stats import t
 from statsmodels.stats.multitest import multipletests
 
 import warnings
+
+from quantcompare.args_handler import parse_args
+from quantcompare.dclasses import Group, GroupRatio, QuantGroup, Psm
+from quantcompare.file_writer import get_ratio_data_wide
+from quantcompare.ratio_rollup import mean_ratio_rollup, reference_mean_ratio_rollup
 
 # Suppress only the specific RuntimeWarning related to precision loss in scipy
 warnings.filterwarnings('ignore', category=RuntimeWarning,
@@ -21,118 +23,44 @@ warnings.filterwarnings('ignore', category=RuntimeWarning,
 np.seterr(divide='ignore', invalid='ignore')
 
 
-def sum_uncertainty(*std_devs: np.ndarray) -> np.ndarray:
-    """
-    Calculate the uncertainty (standard deviation) of the sum of multiple values.
-    """
-    # Calculate the variance of the sum by adding the squares of the standard deviations
-    variance_sum = sum([std_dev ** 2 for std_dev in std_devs])
-
-    # The standard deviation is the square root of the variance
-    return np.sqrt(variance_sum)
-
-
-def log2_transformed_uncertainty(ratio: np.ndarray, ratio_std: np.ndarray) -> np.ndarray:
-    """
-    Calculate the uncertainty (standard deviation) of the log2-transformed value of a given ratio.
-    """
-
-    # Calculate the standard deviation of the log2-transformed ratio
-    ln2 = np.log(2)
-    log2_uncertainty = np.divide(ratio_std, (ratio * ln2))
-
-    return log2_uncertainty
-
-
-def mean_uncertainty(*std_devs: np.ndarray) -> np.ndarray:
-    """
-    Calculate the uncertainty (standard deviation) of the mean of multiple values.
-    """
-    # Calculate the variance of the mean by dividing the sum of the squares of the standard deviations by the number of
-    # measurements squared
-    variance_mean = sum([std_dev ** 2 for std_dev in std_devs]) / len(std_devs) ** 2
-
-    # The standard deviation is the square root of the variance
-    return np.sqrt(variance_mean)
-
-
-def divide_uncertainty(numerator: np.ndarray, numerator_std: np.ndarray, denominator: np.ndarray,
-                       denominator_std: np.ndarray) -> np.ndarray:
-    """
-    Calculate the uncertainty (standard deviation) of the division of two measurements.
-    """
-    # Calculate the variance of the division
-    variance_division = (np.divide(numerator_std, denominator) ** 2) + (
-            np.divide(numerator * denominator_std, denominator ** 2) ** 2)
-
-    # Return the standard deviation of the division (sqrt of variance)
-    return np.sqrt(variance_division)
-
-
-@dataclass(frozen=True)
-class Psm:
-    peptide: str
-    charge: int
-    filename: str
-    proteins: List[str]
-    scannr: int
-    intensities: np.array(np.float32)
-    norm_intensities: np.array(np.float32)
-
-
-@dataclass(frozen=True)
-class QuantGroup:
-    group: Any
-    group_indices: List[int]
-    psm: Psm
-
-    @property
-    def intensities(self) -> np.ndarray:
-        return self.psm.intensities[self.group_indices]
-
-    @property
-    def norm_intensities(self) -> np.ndarray:
-        return self.psm.norm_intensities[self.group_indices]
-
-
-def group_intensities(intensities: np.ndarray, groups: Dict[Any, List[int]]) -> List[np.ndarray]:
-    """
-    Group the intensities by the indices in the groups dictionary.
-    """
-    grouped_intensities = []
-    for _, indices in groups.items():
-        grouped_intensities.append(intensities[:, indices])
-    return grouped_intensities
-
-
-def add_norm_intensities_to_df(df: pd.DataFrame) -> None:
-    """
-    Add normalized intensities to the DataFrame.
-    """
-
-    intensities = np.vstack(df['reporter_ion_intensity'].values).astype(np.float32)
-    norm_intensities = copy.deepcopy(intensities)
-
-    for filename in df['filename'].unique():
-        mask = (df['filename'] == filename).values
-        file_ints = norm_intensities[mask, :]
-        sums = np.sum(file_ints, axis=0, keepdims=True)
-        average_sum = np.mean(sums)
-        norm_factor = average_sum * sums
-        norm_intensities[mask, :] /= norm_factor
-
-    # Normalize across files if needed
-    global_sums = np.sum(norm_intensities, axis=0, keepdims=True)
-    global_average_sum = np.mean(global_sums)
-    norm_intensities /= global_average_sum * global_sums
-
-    df['normalized_reporter_ion_intensity'] = norm_intensities.tolist()
-
-
-def make_quant_groups(df: pd.DataFrame, groups: Dict[Any, List[int]]) -> List[QuantGroup]:
+def make_quant_groups(df: pd.DataFrame, groups: List[Group]) -> List[QuantGroup]:
     """
     Create a list of QuantGroup objects from a DataFrame and a groups dictionary.
+
+    1) Map the groups to their file and channel indices.
+    2) Create Psm objects for each row in the DataFrame.
+    3) For each created Psm, create a QuantGroups for the groups associated with the Psm.
+    4) Return the list of QuantGroups.
+
+    :param df: The DataFrame with the reporter ion intensities.
+    :param groups: The list of Group objects, representing channel information.
+    :return: The list of QuantGroup objects.
+
+    . code-block:: python
+
+        >>> import pandas as pd
+        >>> import numpy as np
+        >>> data = {}
+        >>> data['peptide'] = ['PEP', 'PEP', 'TID', 'IDE']
+        >>> data['charge'] = [2, 3, 2, 2]
+        >>> data['filename'] = ['file1', 'file1', 'file1', 'file1']
+        >>> data['proteins'] = [['P1'], ['P1'], ['P2'], ['P3']]
+        >>> data['scannr'] = [1, 2, 3, 4]
+        >>> data['reporter_ion_intensity'] = [[1, 2], [3, 4], [5, 6], [7, 8]]
+        >>> data['normalized_reporter_ion_intensity'] = [[0.1, 0.2], [0.3, 0.4], [0.5, 0.6], [0.7, 0.8]]
+        >>> df = pd.DataFrame(data)
+
+        >>> groups = [Group('1', 'file1', 0, 1), Group('2', 'file1', 1, 1)]
+        >>> quant_groups = make_quant_groups(df, groups)
+        >>> len(quant_groups) # 4 PSMs and 2 groups = 8 QuantGroups
+        8
+        >>> str(quant_groups[0]) # Group 1
+        'QuantGroup(1, [0], Psm(PEP, 2, file1, P1, 1, [1.0, 2.0], [0.1, 0.2]))'
+
     """
+    # TODO: There may be issues if channels are ever shared between files ( Group 1 has 2 channels in file A and B)?
+
+    groups_dict = map_groups_to_indices(groups)
 
     quant_groups = []
     # Create Psm objects for each row in the group
@@ -143,544 +71,56 @@ def make_quant_groups(df: pd.DataFrame, groups: Dict[Any, List[int]]) -> List[Qu
 
     # Create QuantGroup objects for each Psm and associated groups
     for psm in psms:
-        for group, indices in groups.items():
-            # Assuming you need to select the intensities by the indices here; otherwise, adjust accordingly.
-            quant_groups.append(QuantGroup(group, indices, psm))
+        for group, file_dict in groups_dict.items():
+            if psm.filename not in file_dict:
+                continue
+            quant_groups.append(QuantGroup(group, file_dict[psm.filename], psm))
 
     return quant_groups
 
 
-def calculate_p_value_against_zero(mean, std_dev, n):
+def _assign_qvalues(pvalues: np.ndarray) -> np.ndarray:
+    # TODO: Check if this is the correct way to handle QValues
     """
-    Calculate the p-value for a one-sample t-test comparing the sample mean to 0.
-    """
+    . code-block:: python
 
-    mu_0 = 0
+        >>> pvalues = np.array([0.1, 0.2, 0.3, np.nan, 0.4, 0.5])
+        >>> _assign_qvalues(pvalues)
+        array([0.5, 0.5, 0.5, nan, 0.5, 0.5])
 
-    # Calculate the t-statistic
-    t_statistic = (mean - mu_0) / (std_dev / np.sqrt(n))
-
-    # Calculate the p-value
-    p_value = t.sf(np.abs(t_statistic), df=n - 1) * 2  # two-tailed test
-
-    return p_value
-
-
-"""
-def simple_sum_ratio_zscore(arr1: np.array, arr2: np.array) -> Tuple[float, float, float]:
-    # Simply sums the intensities of each group and returns the ratio
-    group1_mean, group1_std = np.mean(arr1, axis=1), np.std(arr1, axis=1)
-    group2_mean, group2_std = np.mean(arr2, axis=1), np.std(arr2, axis=1)
-
-    # take the sum of the means
-    group1_mean, group1_mean_std = np.sum(group1_mean), sum_uncertainty(*group1_std)
-    group2_mean, group2_mean_std = np.sum(group2_mean), sum_uncertainty(*group2_std)
-
-    # Calculate the ratio of the means and the uncertainties
-    ratio, ratio_std = np.divide(group1_mean, group2_mean), divide_uncertainty(group1_mean, group1_mean_std,
-                                                                               group2_mean, group2_mean_std)
-    log2_ratio, log2_std = np.log2(ratio), log2_transformed_uncertainty(ratio, ratio_std)
-
-    log2_ratio_zscore = (log2_ratio - 0) / log2_std
-    log2_ratio_zscore_pvalue = stats.norm.sf(np.abs(log2_ratio_zscore)) * 2
-
-    return log2_ratio, log2_std, log2_ratio_zscore_pvalue
-
-
-def simple_sum_ratio_ttest_1samp(arr1: np.array, arr2: np.array) -> Tuple[float, float, float, float, float]:
-    # Calculate the mean of each row
-    group1_mean, group1_std = np.mean(arr1, axis=1), np.std(arr1, axis=1)
-    group2_mean, group2_std = np.mean(arr2, axis=1), np.std(arr2, axis=1)
-
-    # Calculate the ratio of the means and the uncertainties
-    ratios = group1_mean / group2_mean
-    ratio_uncertainties = divide_uncertainty(group1_mean, group1_std, group2_mean, group2_std)
-
-    # Calculate the log2 of the ratios and the uncertainties
-    log2_ratios = np.log2(ratios)
-    log2_ratio_uncertainties = log2_transformed_uncertainty(ratios, ratio_uncertainties)
-
-    # Calculate the mean of the log2 ratios and uncertainties
-    log2_ratio = np.mean(log2_ratios)
-    log2_std = np.mean(log2_ratio_uncertainties)
-
-    pvalue = stats.ttest_1samp(log2_ratios, 0)[1]
-
-    return log2_ratio, log2_std, pvalue
-
-
-def colum_sum_ratio(arr1: np.array, arr2: np.array) -> Tuple[float, float, float]:
-    # Sums the intensities of each column and returns the ratio
-
-    group1_sums = np.sum(arr1, axis=0)
-    group2_sums = np.sum(arr2, axis=0)
-
-    group1_mean, group1_std = np.mean(group1_sums), np.std(group1_sums)
-    group2_mean, group2_std = np.mean(group2_sums), np.std(group2_sums)
-
-    ratio = np.divide(group1_mean, group2_mean)
-    std = divide_uncertainty(group1_mean, group1_std, group2_mean, group2_std)
-
-    pvalue = stats.ttest_ind(group1_sums, group2_sums)[1]
-    log2_ratio = np.log2(ratio)
-    log2_std = log2_transformed_uncertainty(ratio, std)
-
-    return log2_ratio, log2_std, pvalue
-"""
-
-
-def reference_mean_ratio_rollup(arr1: np.array, arr2: np.array, inf_replacement: float = 100) -> Tuple[
-    float, float, float]:
-    """
-    Calculate the ratio of the mean of each row of two arrays.
-
-    .. code-block:: python
-
-        >>> arr1 = np.array([[100, 110, 105], [200, 210, 205]])
-        >>> arr2 = np.array([[200, 230, 240, 200], [400, 430, 440, 410]])
-        >>> reference_mean_ratio_rollup(arr1, arr2)
-        (-0.09307656849087903, 2.5476488778079367, 0.9205955813892215)
-
-        >>> arr1 = np.array([[0, 0, 0], [200, 210, 205]])
-        >>> arr2 = np.array([[200, 230, 240, 0], [400, 430, 440, 0]])
-        >>> reference_mean_ratio_rollup(arr1, arr2)
-        (-inf, nan, nan)
+        >>> pvalues = np.array([0.01, 0.5, 0.6, np.nan, 0.3, 0.1])
+        >>> _assign_qvalues(pvalues)
+        array([0.05, 0.6 , 0.6 ,  nan, 0.5 , 0.25])
 
     """
+    # Filter out NaN values and keep track of their original indices
+    non_nan_indices = np.array([i for i, pv in enumerate(pvalues) if not np.isnan(pv)])
+    non_nan_pvalues = np.array([pv for pv in pvalues if not np.isnan(pv)])
 
-    # Calculate the mean of group1
-    group1_means, group1_stds = np.mean(arr1, axis=1).reshape(-1, 1), np.std(arr1, axis=1).reshape(-1, 1)
+    # Perform multipletests on non-NaN p-values
+    qvalues = np.full(len(pvalues), np.nan)  # Initialize full array with NaNs
 
-    # Calculate the ratios
-    ratios = np.divide(group1_means, arr2)
-    ratios_std = divide_uncertainty(group1_means, group1_stds, arr2, np.zeros_like(arr2))
+    if len(non_nan_pvalues) > 0:
+        qvalues_non_nan = multipletests(non_nan_pvalues, method='fdr_bh')[1]
+        qvalues[non_nan_indices] = qvalues_non_nan  # Update only the non-NaN positions
 
-    # Calculate the log2 of the ratios and the uncertainties
-    log2_ratios = np.log2(ratios)
-    log2_ratio_uncertainties = log2_transformed_uncertainty(ratios, ratios_std)
-
-    # get index of positive and negative infinities and nan
-    pos_inf_idx = np.isposinf(log2_ratios)
-    neg_inf_idx = np.isneginf(log2_ratios)
-    nan_idx = np.isnan(log2_ratios)
-
-    # replace positive infinities with inf_replacement, and uncertainties with 1/10 of the replacement
-    log2_ratios[pos_inf_idx] = inf_replacement
-    log2_ratio_uncertainties[pos_inf_idx] = inf_replacement // 10
-    # replace negative infinities with -inf_replacement, and uncertainties with 1/10 of the replacement
-    log2_ratios[neg_inf_idx] = -inf_replacement
-    log2_ratio_uncertainties[neg_inf_idx] = inf_replacement // 10
-    # replace nan with 0, and uncertainties with 1/10 of the replacement
-    log2_ratios[nan_idx] = 0
-    log2_ratio_uncertainties[nan_idx] = inf_replacement // 10
-
-    # remove nans
-    ratios = ratios[~np.isnan(ratios)]
-
-    # if all ratios are nan, return nan
-    if len(ratios) == 0:
-        return np.inf, np.nan, np.nan
-
-    log2_ratios = np.log2(ratios)
-
-    # Replace positive infinities
-    log2_ratios[np.isposinf(log2_ratios)] = inf_replacement
-
-    # Replace negative infinities
-    log2_ratios[np.isneginf(log2_ratios)] = -inf_replacement
-
-    # Calculate the mean of the log2 ratios and uncertainties
-    log2_ratio = np.mean(log2_ratios)
-    log2_std = mean_uncertainty(*log2_ratio_uncertainties)[0]
-    pvalue = calculate_p_value_against_zero(log2_ratio, log2_std, len(log2_ratios) * min(arr1.shape[1], arr2.shape[1]))
-
-    return float(log2_ratio), float(log2_std), float(pvalue)
-
-
-def mean_ratio_rollup(arr1: np.array, arr2: np.array, inf_replacement: float = 100) -> Tuple[float, float, float]:
-    """
-    Calculate the ratio of the mean of each row of two arrays.
-
-    .. code-block:: python
-
-        >>> arr1 = np.array([[100, 110, 105], [200, 210, 205]])
-        >>> arr2 = np.array([[200, 230, 240, 200], [400, 430, 440, 410]])
-        >>> mean_ratio_rollup(arr1, arr2)
-        (-1.0426957456153223, 0.07236359360185755, 3.43566121759087e-07)
-
-
-        >>> arr1 = np.array([[0, 0, 0], [200, 210, 205], [0, 0, 0]])
-        >>> arr2 = np.array([[200, 230, 240, 200], [0, 0, 0, 0], [0, 0, 0, 0]])
-        >>> mean_ratio_rollup(arr1, arr2)
-        (-1.0426957456153223, 0.07236359360185755, 3.43566121759087e-07)
-
-    """
-
-    # Calculate the means and standard deviations of group of reporter ions
-    group1_means, group1_stds = np.mean(arr1, axis=1).reshape(-1, 1), np.std(arr1, axis=1).reshape(-1, 1)
-    group2_means, group2_stds = np.mean(arr2, axis=1).reshape(-1, 1), np.std(arr2, axis=1).reshape(-1, 1)
-
-    # Calculate the ratios and uncertainties
-    ratios = np.divide(group1_means, group2_means)
-    ratio_uncertainties = divide_uncertainty(group1_means, group1_stds, group2_means, group2_stds)
-
-    # Calculate the log2 of the ratios and the uncertainties
-    log2_ratios = np.log2(ratios)
-    log2_ratio_uncertainties = log2_transformed_uncertainty(ratios, ratio_uncertainties)
-
-    # get index of positive and negative infinities and nan
-    pos_inf_idx = np.isposinf(log2_ratios)
-    neg_inf_idx = np.isneginf(log2_ratios)
-    nan_idx = np.isnan(log2_ratios)
-
-    # replace positive infinities with inf_replacement, and uncertainties with 1/10 of the replacement
-    log2_ratios[pos_inf_idx] = inf_replacement
-    log2_ratio_uncertainties[pos_inf_idx] = inf_replacement // 10
-    # replace negative infinities with -inf_replacement, and uncertainties with 1/10 of the replacement
-    log2_ratios[neg_inf_idx] = -inf_replacement
-    log2_ratio_uncertainties[neg_inf_idx] = inf_replacement // 10
-    # replace nan with 0, and uncertainties with 1/10 of the replacement
-    log2_ratios[nan_idx] = 0
-    log2_ratio_uncertainties[nan_idx] = inf_replacement // 10
-
-    # Calculate the mean of the log2 ratios and uncertainties
-    log2_ratio = np.mean(log2_ratios)
-    log2_std = mean_uncertainty(*log2_ratio_uncertainties)[0]
-    pvalue = calculate_p_value_against_zero(log2_ratio, log2_std, len(log2_ratios) * min(arr1.shape[1], arr2.shape[1]))
-
-    return float(log2_ratio), float(log2_std), float(pvalue)
-
-
-@dataclass()
-class GroupRatio:
-    QuantGroup1: List[QuantGroup]
-    QuantGroup2: List[QuantGroup]
-    ratio_function: Callable
-
-    # global properties (added later)
-    qvalue: float = None
-    norm_qvalue: float = None
-    centered_log2_ratio: float = None
-    centered_norm_log2_ratio: float = None
-
-    @cached_property
-    def _log2_ratio(self) -> Tuple[float, float, float]:
-        return self.ratio_function(self.group1_intensity_arr, self.group2_intensity_arr)
-
-    @cached_property
-    def _log2_norm_ratio(self) -> Tuple[float, float, float]:
-        return self.ratio_function(self.group1_norm_intensity_arr, self.group2_norm_intensity_arr)
-
-    @property
-    def ratio(self) -> float:
-        return 2 ** self.log2_ratio
-
-    @property
-    def centered_ratio(self) -> float:
-        return 2 ** self.centered_log2_ratio
-
-    @property
-    def norm_ratio(self) -> float:
-        return 2 ** self.log2_norm_ratio
-
-    @property
-    def centered_norm_ratio(self) -> float:
-        return 2 ** self.centered_norm_log2_ratio
-
-    @property
-    def log2_ratio(self) -> float:
-        return self._log2_ratio[0]
-
-    @property
-    def log2_ratio_std(self) -> float:
-        return self._log2_ratio[1]
-
-    @property
-    def log2_ratio_pvalue(self) -> float:
-        return self._log2_ratio[2]
-
-    @property
-    def log2_norm_ratio(self) -> float:
-        return self._log2_norm_ratio[0]
-
-    @property
-    def log2_norm_ratio_std(self) -> float:
-        return self._log2_norm_ratio[1]
-
-    @property
-    def log2_norm_ratio_pvalue(self) -> float:
-        return self._log2_norm_ratio[2]
-
-    @cached_property
-    def group1_intensity_arr(self) -> np.ndarray:
-        group1_array = np.array([qg.intensities for qg in self.QuantGroup1], dtype=np.float32)
-        return group1_array
-
-    @cached_property
-    def group2_intensity_arr(self) -> np.ndarray:
-        group2_array = np.array([qg.intensities for qg in self.QuantGroup2], dtype=np.float32)
-        return group2_array
-
-    @cached_property
-    def group1_norm_intensity_arr(self) -> np.ndarray:
-        group1_array = np.array([qg.norm_intensities for qg in self.QuantGroup1], dtype=np.float32)
-        return group1_array
-
-    @cached_property
-    def group2_norm_intensity_arr(self) -> np.ndarray:
-        group2_array = np.array([qg.norm_intensities for qg in self.QuantGroup2], dtype=np.float32)
-        return group2_array
-
-    @property
-    def group1(self) -> Any:
-        assert all(qg.group == self.QuantGroup1[0].group for qg in self.QuantGroup1)
-        return self.QuantGroup1[0].group
-
-    @property
-    def group2(self) -> Any:
-        assert all(qg.group == self.QuantGroup2[0].group for qg in self.QuantGroup2)
-        return self.QuantGroup2[0].group
-
-    @property
-    def group1_total_intensity(self) -> np.ndarray:
-        return np.sum(self.group1_intensity_arr)
-
-    @property
-    def group2_total_intensity(self) -> np.ndarray:
-        return np.sum(self.group2_intensity_arr)
-
-    @property
-    def group1_total_norm_intensity(self) -> np.ndarray:
-        return np.sum(self.group1_norm_intensity_arr)
-
-    @property
-    def group2_total_norm_intensity(self) -> np.ndarray:
-        return np.sum(self.group2_norm_intensity_arr)
-
-    @property
-    def group1_intensity(self) -> np.ndarray:
-        return np.sum(self.group1_intensity_arr, axis=0)
-
-    @property
-    def group2_intensity(self) -> np.ndarray:
-        return np.sum(self.group2_intensity_arr, axis=0)
-
-    @property
-    def group1_norm_intensity(self) -> np.ndarray:
-        return np.sum(self.group1_norm_intensity_arr, axis=0)
-
-    @property
-    def group2_norm_intensity(self) -> np.ndarray:
-        return np.sum(self.group2_norm_intensity_arr, axis=0)
-
-    @property
-    def group1_norm_average_intensity(self) -> np.ndarray:
-        return np.mean(self.group1_norm_intensity)
-
-    @property
-    def group2_norm_average_intensity(self) -> np.ndarray:
-        return np.mean(self.group2_norm_intensity)
-
-    @property
-    def group1_average_intensity(self) -> np.ndarray:
-        return np.mean(self.group1_intensity)
-
-    @property
-    def group2_average_intensity(self) -> np.ndarray:
-        return np.mean(self.group2_intensity)
-
-    def __len__(self) -> float:
-        assert len(self.QuantGroup1) == len(self.QuantGroup2)
-        return len(self.QuantGroup1)
-
-
-def get_psm_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, Any]], groupby_filename: bool) -> \
-        (List[str], List[List[Any]]):
-    """
-    Get the ratio data in wide format for PSMs (groups by peptide, charge, and filename if groupby_filename is True).
-    """
-    if groupby_filename:
-        sort_func = lambda qr: (
-            qr.QuantGroup1[0].psm.peptide, qr.QuantGroup1[0].psm.charge, qr.QuantGroup1[0].psm.filename)
-        groupby_cols = ['peptide', 'charge', 'filename']
-
-    else:
-        sort_func = lambda qr: (qr.QuantGroup1[0].psm.peptide, qr.QuantGroup1[0].psm.charge)
-        groupby_cols = ['peptide', 'charge']
-
-    return _get_ratio_data_wide(quant_ratios, pairs, groupby_cols, sort_func)
-
-
-def get_peptide_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, Any]],
-                                groupby_filename: bool) -> (List[str], List[List[Any]]):
-    """
-    Get the ratio data in wide format for peptides (groups by peptide if groupby_filename is False).
-    """
-    if groupby_filename:
-        sort_func = lambda qr: (qr.QuantGroup1[0].psm.peptide, qr.QuantGroup1[0].psm.filename)
-        groupby_cols = ['peptide', 'filename']
-
-    else:
-        sort_func = lambda qr: (qr.QuantGroup1[0].psm.peptide)
-        groupby_cols = ['peptide']
-
-    return _get_ratio_data_wide(quant_ratios, pairs, groupby_cols, sort_func)
-
-
-def get_protein_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, Any]],
-                                groupby_filename: bool) -> (List[str], List[List[Any]]):
-    """
-    Get the ratio data in wide format for proteins (groups by proteins if groupby_filename is False).
-    """
-    if groupby_filename:
-        sort_func = lambda qr: (qr.QuantGroup1[0].psm.proteins, qr.QuantGroup1[0].psm.filename)
-        groupby_cols = ['proteins', 'filename']
-
-    else:
-        sort_func = lambda qr: (qr.QuantGroup1[0].psm.proteins,)
-        groupby_cols = ['proteins', ]
-
-    return _get_ratio_data_wide(quant_ratios, pairs, groupby_cols, sort_func)
-
-
-def _get_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, Any]], groupby_cols: List[str],
-                         groupby_func: Callable) -> (List[str], List[List[Any]]):
-    """
-    Get the ratio data in wide format for a given groupby function. Looks complex, but just aggregates the data.
-    """
-    pair_keys = set()
-    for pair in pairs:
-        pair_keys.add(pair[0])
-        pair_keys.add(pair[1])
-    pair_keys = list(pair_keys)
-    pair_keys.sort()
-
-    columns = []
-    columns.extend(groupby_cols)
-    for key in pair_keys:
-        columns.extend(
-            [
-                f'intensities_{key}',
-                f'total_intensity_{key}',
-                f'average_intensity_{key}',
-                f'norm_intensities_{key}',
-                f'total_norm_intensity_{key}',
-                f'average_norm_intensity_{key}'
-            ]
-        )
-    for pair in pairs:
-        columns.extend(
-            [
-                f'ratio_{pair[0]}_{pair[1]}',
-                f'centered_ratio_{pair[0]}_{pair[1]}',
-                f'log2_ratio_{pair[0]}_{pair[1]}',
-                f'centered_log2_ratio_{pair[0]}_{pair[1]}',
-                f'log2_ratio_std_{pair[0]}_{pair[1]}',
-                f'log2_ratio_pvalue_{pair[0]}_{pair[1]}',
-                f'log2_ratio_qvalue_{pair[0]}_{pair[1]}',
-                f'norm_ratio_{pair[0]}_{pair[1]}',
-                f'centered_norm_ratio_{pair[0]}_{pair[1]}',
-                f'norm_log2_ratio_{pair[0]}_{pair[1]}',
-                f'centered_norm_log2_ratio_{pair[0]}_{pair[1]}',
-                f'norm_log2_ratio_std_{pair[0]}_{pair[1]}',
-                f'norm_log2_pvalue_{pair[0]}_{pair[1]}',
-                f'norm_log2_qvalue_{pair[0]}_{pair[1]}',
-            ]
-        )
-    columns.append('cnt')
-
-    datas = []
-    quant_ratios.sort(key=groupby_func)
-    for key, group in tqdm.tqdm(groupby(quant_ratios, groupby_func), desc='Generating Wide Data'):
-        data = []
-        group_to_intensities = {}
-        pair_to_ratio_data = {}
-        cnt = 0
-        for quant_ratio in group:
-            cnt += 1
-            pair_to_ratio_data[(quant_ratio.QuantGroup1[0].group, quant_ratio.QuantGroup2[0].group)] = \
-                (
-                    quant_ratio.ratio,
-                    quant_ratio.centered_ratio,
-                    quant_ratio.log2_ratio,
-                    quant_ratio.centered_log2_ratio,
-                    quant_ratio.log2_ratio_std,
-                    quant_ratio.log2_ratio_pvalue,
-                    quant_ratio.qvalue,
-                    quant_ratio.norm_ratio,
-                    quant_ratio.centered_norm_ratio,
-                    quant_ratio.log2_norm_ratio,
-                    quant_ratio.centered_norm_log2_ratio,
-                    quant_ratio.log2_norm_ratio_std,
-                    quant_ratio.log2_norm_ratio_pvalue,
-                    quant_ratio.norm_qvalue,
-                )
-
-            g1, g2 = quant_ratio.group1, quant_ratio.group2
-
-            if g1 not in group_to_intensities:
-                group_to_intensities[g1] = (
-                    quant_ratio.group1_intensity,
-                    quant_ratio.group1_total_intensity,
-                    quant_ratio.group1_average_intensity,
-                    quant_ratio.group1_norm_intensity,
-                    quant_ratio.group1_total_norm_intensity,
-                    quant_ratio.group1_norm_average_intensity)
-
-            if g2 not in group_to_intensities:
-                group_to_intensities[g2] = (
-                    quant_ratio.group2_intensity,
-                    quant_ratio.group2_total_intensity,
-                    quant_ratio.group2_average_intensity,
-                    quant_ratio.group2_norm_intensity,
-                    quant_ratio.group2_total_norm_intensity,
-                    quant_ratio.group2_norm_average_intensity)
-
-        if isinstance(key, tuple):
-            for val in key:
-                data.append(val)
-        else:
-            data.append(key)  # For case where grouby key is a single value: 'peptide' or 'proteins'
-
-        for pair_key in pair_keys:
-            data.extend(group_to_intensities[pair_key])
-
-        for pair in pairs:
-            data.extend(pair_to_ratio_data[pair])
-
-        data.append(cnt)
-
-        datas.append(data)
-
-    return columns, datas
+    return qvalues
 
 
 def assign_qvalues(group_ratios: List[GroupRatio]) -> None:
     """
-    Assign q-values to the group ratios using the Benjamini-Hochberg method.
+    Assign q-values to the group ratios using the Benjamini-Hochberg method. Updates the qvalue attribute of the
+    GroupRatio objects.
+
+    :param group_ratios: The list of GroupRatio objects.
+    :return: None
     """
     # Assuming group_ratios is your list of objects with p-values and you want to update them with q-values
-    pvalues = [qr.log2_ratio_pvalue for qr in group_ratios]
-    norm_pvalues = [qr.log2_norm_ratio_pvalue for qr in group_ratios]
+    pvalues = np.array([qr.log2_ratio_pvalue for qr in group_ratios])
+    norm_pvalues = np.array([qr.log2_norm_ratio_pvalue for qr in group_ratios])
 
-    # Filter out NaN values and keep track of their original indices
-    non_nan_indices = [i for i, pv in enumerate(pvalues) if not np.isnan(pv)]
-    non_nan_pvalues = [pv for pv in pvalues if not np.isnan(pv)]
-
-    non_nan_norm_indices = [i for i, pv in enumerate(norm_pvalues) if not np.isnan(pv)]
-    non_nan_norm_pvalues = [pv for pv in norm_pvalues if not np.isnan(pv)]
-
-    # Perform multipletests on non-NaN p-values
-    qvalues = np.full(len(pvalues), np.nan)  # Initialize full array with NaNs
-    norm_qvalues = np.full(len(norm_pvalues), np.nan)
-
-    if non_nan_pvalues:
-        qvalues_non_nan = multipletests(non_nan_pvalues, method='fdr_bh')[1]
-        qvalues[non_nan_indices] = qvalues_non_nan  # Update only the non-NaN positions
-
-    if non_nan_norm_pvalues:
-        norm_qvalues_non_nan = multipletests(non_nan_norm_pvalues, method='fdr_bh')[1]
-        norm_qvalues[non_nan_norm_indices] = norm_qvalues_non_nan
+    qvalues = _assign_qvalues(pvalues)
+    norm_qvalues = _assign_qvalues(norm_pvalues)
 
     # Update the original objects with the calculated q-values
     for i, qr in enumerate(group_ratios):
@@ -688,48 +128,58 @@ def assign_qvalues(group_ratios: List[GroupRatio]) -> None:
         qr.norm_qvalue = norm_qvalues[i]
 
 
-def assign_centered_log2_ratios(group_ratios: List[GroupRatio], center_type: str, inf_replacement: int) -> None:
+def _assign_centered_log2_ratios(ratios: np.ndarray, center_type: str) -> np.ndarray:
     """
-    Assign centered log2 ratios to the group ratios.
+    . code-block:: python
+
+        >>> ratios = np.array([1, 1, 2, np.nan, 3, 3])
+        >>> center_type = 'mean'
+
+        >>> _assign_centered_log2_ratios(ratios, center_type) # Mean is 2
+        array([-1., -1.,  0., nan,  1.,  1.])
+
+        >>> center_type = 'median'
+        >>> _assign_centered_log2_ratios(ratios, center_type) # Median is 2
+        array([-1., -1.,  0., nan,  1.,  1.])
+
     """
-    # Assuming group_ratios is your list of objects with p-values and you want to update them with q-values
-    log2_ratios = [qr.log2_ratio for qr in group_ratios]
-    log2_norm_ratios = [qr.log2_norm_ratio for qr in group_ratios]
 
     # Filter out NaN values and keep track of their original indices
-    non_nan_indices = [i for i, lr in enumerate(log2_ratios) if not np.isnan(lr)]
-    non_nan_log2_ratios = [lr for lr in log2_ratios if not np.isnan(lr)]
+    non_nan_indices = np.array([i for i, lr in enumerate(ratios) if not np.isnan(lr)])
+    non_nan_ratios = np.array([lr for lr in ratios if not np.isnan(lr)])
+    centered_ratios = np.full(len(ratios), np.nan)  # Initialize full array with NaNs
 
-    # replace infinities
-    non_nan_log2_ratios = [inf_replacement if np.isposinf(lr) else lr for lr in non_nan_log2_ratios]
-    non_nan_log2_ratios = [-inf_replacement if np.isneginf(lr) else lr for lr in non_nan_log2_ratios]
+    def _center_log2_ratios(rs: np.ndarray, ct: str) -> np.ndarray:
 
-    non_nan_norm_indices = [i for i, lr in enumerate(log2_norm_ratios) if not np.isnan(lr)]
-    non_nan_log2_norm_ratios = [lr for lr in log2_norm_ratios if not np.isnan(lr)]
-
-    # replace infinities
-    non_nan_log2_norm_ratios = [inf_replacement if np.isposinf(lr) else lr for lr in non_nan_log2_norm_ratios]
-    non_nan_log2_norm_ratios = [-inf_replacement if np.isneginf(lr) else lr for lr in non_nan_log2_norm_ratios]
-
-    centered_log2_ratios = np.full(len(log2_ratios), np.nan)  # Initialize full array with NaNs
-    centered_log2_norm_ratios = np.full(len(log2_norm_ratios), np.nan)
-
-    def _center_log2_ratios(log2_ratios, center_type):
-
-        if center_type == 'mean':
-            return log2_ratios - np.mean(log2_ratios)
-        elif center_type == 'median':
-            return log2_ratios - np.median(log2_ratios)
+        if ct == 'mean':
+            return rs - np.mean(rs)
+        elif ct == 'median':
+            return rs - np.median(rs)
         else:
-            raise ValueError(f'Invalid center_type: {center_type}')
+            raise ValueError(f'Invalid center_type: {ct}')
 
-    if non_nan_log2_ratios:
-        centered_log2_ratios_non_nan = _center_log2_ratios(non_nan_log2_ratios, center_type)
-        centered_log2_ratios[non_nan_indices] = centered_log2_ratios_non_nan  # Update only the non-NaN positions
+    if len(non_nan_ratios) > 0:
+        centered_log2_ratios_non_nan = _center_log2_ratios(non_nan_ratios, center_type)
+        centered_ratios[non_nan_indices] = centered_log2_ratios_non_nan  # Update only the non-NaN positions
 
-    if non_nan_log2_norm_ratios:
-        centered_log2_norm_ratios_non_nan = _center_log2_ratios(non_nan_log2_norm_ratios, center_type)
-        centered_log2_norm_ratios[non_nan_norm_indices] = centered_log2_norm_ratios_non_nan
+    return centered_ratios
+
+
+def assign_centered_log2_ratios(group_ratios: List[GroupRatio], center_type: str) -> None:
+    """
+    Assign centered log2 ratios to the group ratios. Updates the centered_log2_ratio attribute of the GroupRatio
+    objects.
+
+    :param group_ratios: The list of GroupRatio objects.
+    :param center_type: The method to center the log2 ratios. One of 'mean' or 'median'.
+    :return: None
+    """
+    # Assuming group_ratios is your list of objects with p-values and you want to update them with q-values
+    log2_ratios = np.array([qr.log2_ratio for qr in group_ratios])
+    log2_norm_ratios = np.array([qr.log2_norm_ratio for qr in group_ratios])
+
+    centered_log2_ratios = _assign_centered_log2_ratios(log2_ratios, center_type)
+    centered_log2_norm_ratios = _assign_centered_log2_ratios(log2_norm_ratios, center_type)
 
     # Update the original objects with the calculated q-values
     for i, qr in enumerate(group_ratios):
@@ -737,10 +187,26 @@ def assign_centered_log2_ratios(group_ratios: List[GroupRatio], center_type: str
         qr.centered_norm_log2_ratio = centered_log2_norm_ratios[i]
 
 
-def _group_quant_groups(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, Any]], group_function: Callable,
-                        ratio_function: Callable) -> List[GroupRatio]:
+def group_quant_groups(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, Any]], group_function: Callable,
+                       ratio_function: Callable) -> List[GroupRatio]:
     """
     Group the quant groups by the group_function and calculate the ratios for each pair of groups.
+
+    . code-block:: python
+
+        >>> psm1 = Psm('PEP', 2, 'file1', ['P1'], 1, np.array([1.0, 4.0]), np.array([0.1, 0.2]))
+        >>> qg1 = QuantGroup('1', [0], psm1)
+        >>> qg2 = QuantGroup('2', [1], psm1)
+        >>> pairs = [('1', '2')]
+        >>> group_function = lambda x: x.psm.peptide
+        >>> ratio_function = mean_ratio_rollup
+
+        >>> group_ratios = group_quant_groups([qg1, qg2], pairs, group_function, ratio_function)
+        >>> len(group_ratios)
+        1
+        >>> str(group_ratios[0])
+        'GroupRatio(Pair=(1, 2), log2_ratio=-2.0, log2_norm_ratio=-1.0)'
+
     """
     quant_groups = sorted(quant_groups, key=group_function)
 
@@ -766,35 +232,327 @@ def _group_quant_groups(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, A
     return group_ratios
 
 
-def group_by_psms(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, Any]], groupby_filename: bool,
-                  ratio_function: Callable) -> List[
-    GroupRatio]:
-    # sort quant_groups by peptide, charge, filename
-    if groupby_filename:
-        return _group_quant_groups(quant_groups, pairs, lambda qg: (qg.psm.peptide, qg.psm.charge, qg.psm.filename),
-                                   ratio_function)
-    return _group_quant_groups(quant_groups, pairs, lambda qg: (qg.psm.peptide, qg.psm.charge), ratio_function)
+def map_groups_to_indices(groups: List[Group]) -> Dict[Any, Dict[str, List[int]]]:
+    groups_dict: Dict[Any, Dict[str, List[int]]] = {}
+    for group in groups:
+        if group.group not in groups_dict:
+            groups_dict[group.group] = {}
+        if group.filename not in groups_dict[group.group]:
+            groups_dict[group.group][group.filename] = []
+        groups_dict[group.group][group.filename].append(group.channel_index)
+
+    for group, file_dict in groups_dict.items():
+        for filename, indices in file_dict.items():
+            groups_dict[group][filename] = sorted(list(set(indices)))
+
+    return groups_dict
 
 
-def group_by_peptides(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, Any]], groupby_filename: bool,
-                      ratio_function: Callable) -> \
-        List[GroupRatio]:
-    # sort quant_groups by peptide, charge, filename
-    if groupby_filename:
-        return _group_quant_groups(quant_groups, pairs, lambda qg: (qg.psm.peptide, qg.psm.filename), ratio_function)
-    return _group_quant_groups(quant_groups, pairs, lambda qg: qg.psm.peptide, ratio_function)
+QvalueLevel: TypeAlias = Literal["peptide", "protein", "spectrum", "all", "none"]
+IntensityNormalizationMethod: TypeAlias = Literal["median", "mean", "none"]
+RatioGroupingLevel: TypeAlias = Literal["psm", "peptide", "protein"]
+CenteringMethod: TypeAlias = Literal["mean", "median", "none"]
+OutputType: TypeAlias = Literal["csv", "parquet"]
+DataframeFormat: TypeAlias = Literal["wide", "long"]
+ProteinFilterMethod: TypeAlias = Literal["unique", "all", "unique_protein_group"]
 
 
-def group_by_proteins(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, Any]], groupby_filename: bool,
-                      ratio_function: Callable) -> \
-        List[GroupRatio]:
-    # sort quant_groups by protein, filename
-    if groupby_filename:
-        return _group_quant_groups(quant_groups, pairs, lambda qg: (qg.psm.proteins, qg.psm.filename), ratio_function)
-    return _group_quant_groups(quant_groups, pairs, lambda qg: qg.psm.proteins, ratio_function)
+def parse_sage_results(df: pd.DataFrame, max_rows: int, keep_decoy: bool, keep_contaminant: bool,
+                       qvalue_level: QvalueLevel, qvalue_threshold: float, keep_psm: int) -> pd.DataFrame:
+    """
+    Filter the input data based on the input arguments.
+
+    1) Read the input file.
+    2) Take first max_rows rows, if applicable.
+    3) Remove decoy PSMs, if applicable.
+    4) Filter based on q-value level and threshold.
+    5) Keep only keep_psm PSMs per scan number per file, if applicable.
+    6) Return the filtered DataFrame.
+
+    :param df: The DataFrame with the input data.
+    :param max_rows: The maximum number of rows to read from the input file.
+    :param keep_decoy: Whether to keep decoy PSMs.
+    :param qvalue_level: The q-value level to filter on. One of 'peptide', 'protein', 'spectrum', 'all' or 'none'.
+    :param qvalue_threshold: The q-value threshold for significance, any PSM with a q-value below this threshold at the
+                             specified level(s) will be kept.
+    :param keep_psm: The number of PSMs to keep per scan number per file.
+    :return: The DataFrame with the normalized input data.
+
+    . code-block:: python
+
+        >>> import pandas as pd
+        >>> data = {}
+        >>> data['peptide'] = ['PEP', 'PEP', 'TID', 'IDE']
+        >>> data['charge'] = [2, 3, 2, 2]
+        >>> data['filename'] = ['file1', 'file1', 'file1', 'file1']
+        >>> data['proteins'] = ['P1', 'P1;P2', 'P2', 'P3']
+        >>> data['scannr'] = [1, 1, 3, 4]  # First 2 are Chimeric
+        >>> data['is_decoy'] = [False, False, True, False] # Third is Decoy
+        >>> data['peptide_q'] = [0.1, 0.1, 0.3, 0.4] # First 2 pass filter
+        >>> data['protein_q'] = [0.1, 0.1, 0.4, 0.5] # First 2 pass filter
+        >>> data['spectrum_q'] = [0.1, 0.1, 0.5, 0.6] # First 2 pass filter
+        >>> data['rank'] = [1, 2, 1, 1]
+        >>> data['reporter_ion_intensity'] = [[1, 2], [3, 4], [5, 6], [7, 8]]
+        >>> df = pd.DataFrame(data)
+
+        >>> df = parse_sage_results(df, 3, False, True, 'all', 0.2, 1)
+        Reading only the first 3 rows
+        Total PSMs:                    3
+        Filtered PSMs (Decoy):         1
+        Filtered PSMs (Qvalue):        0
+        Filtered PSMs (Chimeric):      1
+        Remaining PSMs:                1
+        <BLANKLINE>
+
+        >>> df[['peptide', 'rank']]
+          peptide  rank
+        0     PEP     1
+
+    """
+
+    if max_rows > 0:
+        print(f'{"Reading only the first":<20} {max_rows} rows')
+        df = df.head(max_rows)
+
+    # Filter input data
+    starting_rows = len(df)
+    print(f'{"Total PSMs:":<30} {starting_rows}')
+
+    # Remove decoys specified by "is_decoy" column
+    if not keep_decoy:
+        df = df[~df['is_decoy']].reset_index(drop=True)
+
+    if not keep_contaminant:
+        contaminant_indices = df['proteins'].str.lower().str.contains('contaminant')
+        df = df[~contaminant_indices].reset_index(drop=True)
+
+    print(f'{"Filtered PSMs (Decoy):":<30} {starting_rows - len(df)}')
+    starting_rows = len(df)
+
+    # Filter based on q-value at the specified level
+    if qvalue_level == 'peptide':
+        df = df[(df.peptide_q <= qvalue_threshold)].reset_index(drop=True)
+    elif qvalue_level == 'protein':
+        df = df[(df.protein_q <= qvalue_threshold)].reset_index(drop=True)
+    elif qvalue_level == 'spectrum':
+        df = df[(df.spectrum_q <= qvalue_threshold)].reset_index(drop=True)
+    elif qvalue_level == 'all':
+        df = df[(df.spectrum_q <= qvalue_threshold) &
+                (df.peptide_q <= qvalue_threshold) &
+                (df.protein_q <= qvalue_threshold)].reset_index(drop=True)
+    elif qvalue_level == 'none':
+        pass
+    else:
+        raise ValueError(f'Invalid qvalue level: {qvalue_level}')
+
+    print(f'{"Filtered PSMs (Qvalue):":<30} {starting_rows - len(df)}')
+    starting_rows = len(df)
+
+    # drop duplicates (keep args.keep_psm top PSMs per scan number per file)
+    if keep_psm > 0:
+        df.sort_values(['scannr', 'filename', 'rank'], ascending=[True, True, True], inplace=True)
+        df = df.groupby(['scannr', 'filename']).head(keep_psm).reset_index(drop=True)
+
+    print(f'{"Filtered PSMs (Chimeric):":<30} {starting_rows - len(df)}')
+    print(f'{"Remaining PSMs:":<30} {len(df)}')
+    print()
+
+    # for rows which have all 0 intensities, replace with an array of NaNs
+    df['reporter_ion_intensity'] = df['reporter_ion_intensity'].apply(lambda x: [np.nan]*len(x) if np.all(x == 0) else x)
+
+    # count NA
+    na_count = df['reporter_ion_intensity'].apply(lambda x: np.sum(np.isnan(x))).sum()
+    print(f'{"Total NA values:":<30} {na_count}')
 
 
-def filter_quant_groups(quant_groups: List[QuantGroup], filter_type: str) -> List[QuantGroup]:
+    return df
+
+
+def normalize_df(df: pd.DataFrame, groups: List[Group], keep_unused_channels: bool,
+                 intra_file_normalization: IntensityNormalizationMethod,
+                 inter_file_normalization: IntensityNormalizationMethod, row_normalization: bool) -> pd.DataFrame:
+    """
+    Normalize the DataFrame based on the groups and normalization methods.
+
+    1) Split the DataFrame based on the filename.
+    2) Remove unused channels, if applicable (Applies to Intensities and Normalized Intensities).
+    3) Normalize for known channel concentration differences (Applies to Normalized Intensities).
+    4) Normalize each channel based on the intra_file_normalization method (Applies to Normalized Intensities).
+    5) Normalize each row to sum to 1, if applicable (Applies to Normalized Intensities).
+    6) Recombine the DataFrames.
+    7) Normalize each channel based on the inter_file_normalization method (Applies to Normalized Intensities).
+
+    :param df: The DataFrame with the reporter ion intensities.
+    :param groups: The list of Group objects, representing channel information.
+    :param keep_unused_channels: Whether to keep channels that are not used in any group.
+    :param intra_file_normalization: The normalization method to use within each file.
+    :param inter_file_normalization: The normalization method to use across files.
+    :param row_normalization: Whether to normalize each row to sum to 1.
+    :return: The DataFrame with the normalized reporter ion intensities.
+
+    . code-block:: python
+
+        >>> import pandas as pd
+        >>> data = {}
+        >>> data['peptide'] = ['PEP', 'PEP', 'TID', 'IDE']
+        >>> data['charge'] = [2, 3, 2, 2]
+        >>> data['filename'] = ['file1', 'file1', 'file1', 'file1']
+        >>> data['proteins'] = ['P1', 'P1;P2', 'P2', 'P3']
+        >>> data['scannr'] = [1, 1, 3, 4]
+        >>> data['reporter_ion_intensity'] = [[1, 2, 0], [3, 4, 0], [5, 6, 0], [7, 8, 0]]
+
+        >>> groups = [Group('1', 'file1', 0, 1), Group('2', 'file1', 1, 1)]
+        >>> df = normalize_df(pd.DataFrame(data), groups, False, 'median', 'median', False)
+        >>> np.array(df['normalized_reporter_ion_intensity'].tolist()).shape # One column removed
+        (4, 2)
+        >>> df = normalize_df(pd.DataFrame(data), groups, True, 'median', 'median', False)
+        >>> np.array(df['normalized_reporter_ion_intensity'].tolist()).shape # Column kept
+        (4, 3)
+        >>> df = normalize_df(pd.DataFrame(data), groups, True, 'none', 'none', True)
+        >>> np.sum(np.array(df['normalized_reporter_ion_intensity'].tolist()), axis=1) # floating point error
+        array([1.00000003, 1.00000003, 1.00000003, 1.00000003])
+        >>> df = normalize_df(pd.DataFrame(data), groups, False, 'median', 'median', False)
+        >>> np.array(df['normalized_reporter_ion_intensity'].tolist()) # sol_sums = [16, 20, 0] sum_avg = 18
+        array([[1.12499988, 1.79999971],
+               [3.37499976, 3.59999943],
+               [5.625     , 5.39999962],
+               [7.87499952, 7.19999886]])
+
+    """
+    # split sage df based on filename
+    sage_dfs = {}
+    for filename in df['filename'].unique():
+
+        # Find used channel indexes for this file
+        used_channel_indexes = []
+        for group in groups:
+            if group.filename == filename:
+                used_channel_indexes.append(group.channel_index)
+        used_channel_indexes = sorted(list(set(used_channel_indexes)))
+
+        file_df = df[df['filename'] == filename].reset_index(drop=True)
+        intensities = np.vstack(file_df['reporter_ion_intensity'].values).astype(np.float32)
+
+        # Filter unused channels
+        if not keep_unused_channels:
+            intensities = intensities[:, used_channel_indexes]
+            file_df['intensities'] = intensities.tolist()
+
+        # Copy the intensities for normalization
+        norm_intensities = copy.deepcopy(intensities)
+
+        # get the channel concentrations for this file
+        channel_concentrations = np.ones(intensities.shape[1])
+        for group in groups:
+            if group.filename == filename:
+                channel_concentrations[group.channel_index] = group.scale
+
+        norm_intensities /= channel_concentrations
+
+        sums = np.sum(norm_intensities, axis=0, keepdims=True)
+        if intra_file_normalization == 'median':
+            norm_intensities /= np.median(sums) * sums
+        elif intra_file_normalization == 'mean':
+            norm_intensities /= np.mean(sums) * sums
+        elif intra_file_normalization == 'none':
+            pass
+        else:
+            raise ValueError(f'Invalid global normalization method: {intra_file_normalization}')
+
+        # Normalize each row to sum to 1
+        if row_normalization:
+            row_sums = np.sum(norm_intensities, axis=1, keepdims=True)
+            norm_intensities /= row_sums
+
+        file_df['normalized_reporter_ion_intensity'] = norm_intensities.tolist()
+
+        sage_dfs[filename] = file_df
+
+    # Combine the dataframes
+    df = pd.concat(sage_dfs.values(), ignore_index=True)
+
+    # inter_file_normalization
+    norm_intensities = np.vstack(df['normalized_reporter_ion_intensity'].values).astype(np.float32)
+
+    sums = np.sum(norm_intensities, axis=0, keepdims=True)
+    if inter_file_normalization == 'median':
+        norm_intensities /= np.median(sums) * sums
+    elif inter_file_normalization == 'mean':
+        norm_intensities /= np.mean(sums) * sums
+    elif inter_file_normalization == 'none':
+        pass
+    else:
+        raise ValueError(f'Invalid global normalization method: {intra_file_normalization}')
+
+    df['normalized_reporter_ion_intensity'] = norm_intensities.tolist()
+
+    return df
+
+
+def write_to_file(df: pd.DataFrame, file_path: str, output_type: OutputType) -> None:
+    """
+    Write the DataFrame to a file based on the output type.
+
+    :param df: The DataFrame to write.
+    :param file_path: The path to write the file.
+    :param output_type: The output type. One of 'csv' or 'parquet'.
+    """
+    if output_type == 'csv':
+        df.to_csv(file_path, index=False)
+    elif output_type == 'parquet':
+        df.to_parquet(file_path)
+    else:
+        raise ValueError(f'Invalid output type: {output_type}')
+
+
+def build_ratios_df(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, Any]], ratio_function: Callable,
+                    groupby_attributes: List[str], center_method: CenteringMethod,
+                    df_format: DataframeFormat) -> pd.DataFrame:
+    """
+    Build a DataFrame with the ratios for the given groupby attributes.
+
+    1) Create QuantRatios by grouping the QuantGroups and calculating the ratios for each pair of groups.
+    2) Assign q-values to the QuantRatios.
+    3) Assign centered log2 ratios to the QuantRatios.
+    4) Format the DataFrame based on the df_format.
+    5) Return the DataFrame.
+
+    :param quant_groups: The list of QuantGroup objects.
+    :param pairs: The pairs of groups to compare.
+    :param ratio_function: The function to calculate the ratios.
+    :param groupby_attributes: The attributes to group by.
+    :param center_method: The method to center the ratios.
+    :param df_format: The format of the DataFrame.
+    :return: The DataFrame with the ratios.
+    """
+
+    # QuantGroups, GroupRatios, and PSMs all have peptide, protein, charge, filename, and scannr attributes
+    grouping_func = lambda g: [g.__getattribute__(group) for group in groupby_attributes]
+
+    quant_ratios = group_quant_groups(quant_groups=quant_groups,
+                                      pairs=pairs,
+                                      group_function=grouping_func,
+                                      ratio_function=ratio_function)
+    assign_qvalues(quant_ratios)
+    assign_centered_log2_ratios(quant_ratios, center_method)
+    print(f"{'Quant Groups:':<20} {len(quant_ratios)}")
+    time.sleep(0.1)
+
+    # Format the DataFrame
+    if df_format == 'wide':
+        cols, data = get_ratio_data_wide(quant_ratios=quant_ratios,
+                                         pairs=pairs,
+                                         groupby_cols=groupby_attributes,
+                                         groupby_func=grouping_func)
+    elif df_format == 'long':
+        raise NotImplementedError('Long format not implemented yet.')
+    else:
+        raise ValueError(f'Invalid DataFrame format: {df_format}')
+
+    return pd.DataFrame(data, columns=cols)
+
+
+def filter_quant_groups(quant_groups: List[QuantGroup], filter_type: ProteinFilterMethod) -> List[QuantGroup]:
     """
     Filter the quant groups based on the filter type. Unique will only keep quant groups with unique peptides. All will
     keep all quant groups.
@@ -803,100 +561,19 @@ def filter_quant_groups(quant_groups: List[QuantGroup], filter_type: str) -> Lis
         quant_groups = [qg for qg in quant_groups if ';' not in qg.psm.proteins]
     elif filter_type == 'all':
         pass
+    elif filter_type == 'unique_protein_group':
+        raise NotImplementedError('Unique Protein Group not implemented yet.')
     else:
         raise ValueError(f"Invalid filter type: {filter_type}")
 
     return quant_groups
 
 
-def parse_args():
-    parser = argparse.ArgumentParser(
-        description='Quant Compare: Calcualtes ratios of quant groups and performs statistical tests on the ratios.')
-    parser.add_argument('input_file',
-                        help='Input parquet file. Must contain the following columns: "reporter_ion_intensity", '
-                             '"filename", "peptide", "charge", "proteins", and "scannr"')
-    parser.add_argument('output_folder',
-                        help='Output folder for writing output files to. This folder will be created if it does not '
-                             'exist. File names can be specified with the --psm_file and --peptide_file and '
-                             '--protein_file arguments.')
-    parser.add_argument('--psm_file',
-                        help='The file name for the psms ratios file, will be inside the output_folder dir.',
-                        default='psm_ratios')
-    parser.add_argument('--peptide_file',
-                        help='The file name for the peptide ratios file, will be inside the output_folder dir.',
-                        default='peptide_ratios')
-    parser.add_argument('--protein_file',
-                        help='The file name for the protein ratios file, will be inside the output_folder dir.',
-                        default='protein_ratios')
-
-    def parse_pairs(arg):
-        try:
-            return [tuple(map(int, pair.split(','))) for pair in arg.split(';')]
-        except ValueError:
-            raise argparse.ArgumentTypeError("Pairs must be in format '1,2;3,4;...'")
-
-    parser.add_argument('--pairs',
-                        help='Pairs of groups to compare. Pairs must be in the following format: '
-                             '"Group1,Group2;...;Group1:Group3". Each pair must onyl contain 2 values (separated by a '
-                             'comma (",")), and these values must match those in the groups argument. Multiple pairs '
-                             'must be separated by as semicolon (";").',
-                        type=parse_pairs)
-
-    def parse_group(arg):
-        try:
-            groups = {}
-            for group in arg.split(';'):
-                key, indices = group.split(':')
-                groups[int(key)] = list(map(int, indices.split(',')))
-            return groups
-        except ValueError:
-            raise argparse.ArgumentTypeError("Groups must be in format '1:0,1,2;2:3,4,5;...'")
-
-    parser.add_argument('--groups',
-                        help='The group labels mapped to the indecies for their reporter ion channels. '
-                             'Groups must be specified in the following format: '
-                             '"GroupName1:Index1,...,Index3;GroupName2:Index1,...,Index3;". Group names must be '
-                             'unique and can be of any type. Indexes must be separated by a comma (",") and multiple '
-                             'groups must be separated by a semicolon (";").',
-                        type=parse_group)
-    parser.add_argument('--filter', choices=['unique', 'all'], default='all',
-                        help='Filter type for peptides. Unique will only keep peptides which map to a single protein. '
-                             'All will keep all peptides.')
-    parser.add_argument('--groupby_filename', action='store_true',
-                        help='Groupby the filename for psm, peptide and proteins. This will add a filename column '
-                             'to the output files.')
-    parser.add_argument('--output_type', choices=['csv', 'parquet'], default='parquet', help='Output file type.')
-    parser.add_argument('--inf_replacement', default=100,
-                        help='Infinite values cause many problem with the statistics. This value will be used to '
-                             'replace infinite values at the log2 ratio level. Default is 100. (-inf will be replaced '
-                             'with -100 and inf will be replaced with 100)')
-    parser.add_argument('--no_psms', action='store_true', help='Dont output a PSM ratio file.')
-    parser.add_argument('--no_peptides', action='store_true', help='Dont output a Peptide ratio file.')
-    parser.add_argument('--no_proteins', action='store_true', help='Dont output a Protein ratio file.')
-    parser.add_argument('--center', choices=['mean', 'median'], default='median',
-                        help='Center the Log2 Ratios around the mean/median.')
-    parser.add_argument('--max_rows', default=-1, type=int,
-                        help='(DEBUG OPTION) Maximum number of rows to read from the input file. Default is -1 '
-                             '(read all rows).')
-    parser.add_argument('--ratio_function', choices=['mean_ratio_rollup', 'reference_mean_ratio_rollup'],
-                        default='mean_ratio_rollup')
-    parser.add_argument('--keep_decoy', action='store_true',
-                        help='Keep decoy proteins in the analysis. Default is to remove decoys.')
-    parser.add_argument('--keep_psm', default=1, type=int,
-                        help='Keep only the top N PSMs per scan number per file. Default is 1. Set to -1 to keep all '
-                             'PSMs.')
-    parser.add_argument('--qvalue_threshold', default=0.01, type=float, help='Q-value threshold for significance.')
-    parser.add_argument('--qvalue_level', choices=['peptide', 'protein', 'spectrum', 'all'], default='all',
-                        help='Q-value level for significance. Default is peptide.')
-    return parser.parse_args()
-
 
 def run():
     # TODO: Possibly fix nan value and inf value replacement
 
     args = parse_args()
-
-    # Convert args namespace to a dictionary
     args_dict = vars(args)
 
     print("=" * 30)
@@ -908,142 +585,99 @@ def run():
     pprint.pprint(args_dict)
     print()
 
-    os.makedirs(args.output_folder, exist_ok=True)
+    # Create output folder if it does not exist
+    os.makedirs(args.output, exist_ok=True)
 
     print(f'Reading Input File...')
-    sage_df = pd.read_parquet(args.input_file, engine='pyarrow')
-    if args.max_rows > 0:
-        print(f'{"Reading only the first":<20} {args.max_rows} rows')
-        sage_df = sage_df.head(args.max_rows)
+    sage_df = pd.read_parquet(args.input, engine='pyarrow')
 
-    # Filter input data
-    starting_rows = len(sage_df)
-    print(f'{"Total PSMs:":<30} {starting_rows}')
+    sage_df = parse_sage_results(df=sage_df,
+                                 max_rows=args.max_rows,
+                                 keep_decoy=args.keep_decoy,
+                                 keep_contaminant=args.keep_contaminant,
+                                 qvalue_level=args.qvalue_level,
+                                 qvalue_threshold=args.qvalue_threshold,
+                                 keep_psm=args.keep_psm)
 
-    # Remove decoys "is_decoy" column
-    if not args.keep_decoy:
-        sage_df = sage_df[~sage_df['is_decoy']].reset_index()
+    sage_df = normalize_df(df=sage_df,
+                           groups=args.groups,
+                           keep_unused_channels=args.keep_unused_channels,
+                           intra_file_normalization=args.intra_file_normalization,
+                           inter_file_normalization=args.inter_file_normalization,
+                           row_normalization=args.row_normalization)
 
-    print(f'{"Filtered PSMs (Decoy):":<30} {starting_rows - len(sage_df)}')
-    starting_rows = len(sage_df)
-
-    if args.qvalue_level == 'peptide':
-        sage_df = sage_df[(sage_df.peptide_q <= args.qvalue_threshold)].reset_index()
-    elif args.qvalue_level == 'protein':
-        sage_df = sage_df[(sage_df.protein_q <= args.qvalue_threshold)].reset_index()
-    elif args.qvalue_level == 'spectrum':
-        sage_df = sage_df[(sage_df.spectrum_q <= args.qvalue_threshold)].reset_index()
-    elif args.qvalue_level == 'all':
-        sage_df = sage_df[(sage_df.spectrum_q <= args.qvalue_threshold) &
-                          (sage_df.peptide_q <= args.qvalue_threshold) &
-                          (sage_df.protein_q <= args.qvalue_threshold)].reset_index()
-    else:
-        raise ValueError(f'Invalid qvalue level: {args.qvalue_level}')
-
-    print(f'{"Filtered PSMs (Qvalue):":<30} {starting_rows - len(sage_df)}')
-    starting_rows = len(sage_df)
-
-    # drop duplicates (keep args.keep_psm top PSMs per scan number per file)
-    if args.keep_psm > 0:
-        sage_df.sort_values(['scannr', 'filename', 'rank'], ascending=[True, True, True], inplace=True)
-        sage_df = sage_df.groupby(['scannr', 'filename']).head(args.keep_psm)
-        sage_df.reset_index(drop=True, inplace=True)
-
-    print(f'{"Filtered PSMs (Chimeric):":<30} {starting_rows - len(sage_df)}')
-    print(f'{"Remaining PSMs:":<30} {len(sage_df)}')
-    print()
-
-    add_norm_intensities_to_df(sage_df)
     quant_groups = make_quant_groups(sage_df, args.groups)
     print('Creating Quant Groups...')
     print(f"{'Total Quant Groups:':<30} {len(quant_groups)}")
     print()
 
+    # TODO: Add a similarity metric to check if normalization worked (probably fine to check mean/median/std of channel ints)
+    # TODO: Center in normalization?
+
+    # Create ratio function
     if args.ratio_function == 'mean_ratio_rollup':
-        ratio_function = partial(mean_ratio_rollup, inf_replacement=100)
+        ratio_function = partial(mean_ratio_rollup, inf_replacement=args.inf_replacement)
     elif args.ratio_function == 'reference_mean_ratio_rollup':
-        ratio_function = partial(reference_mean_ratio_rollup, inf_replacement=100)
+        ratio_function = partial(reference_mean_ratio_rollup, inf_replacement=args.inf_replacement)
     else:
         raise ValueError(f'Invalid ratio function: {args.ratio_function}')
 
     if not args.no_psms:
         print('Grouping PSMs...')
-        psm_quant_ratios = group_by_psms(quant_groups, args.pairs, args.groupby_filename, ratio_function)
-        assign_qvalues(psm_quant_ratios)
-        assign_centered_log2_ratios(psm_quant_ratios, args.center, args.inf_replacement)
-        print(f"{'PSM Quant Groups:':<20} {len(psm_quant_ratios)}")
-        time.sleep(0.1)
+        df = build_ratios_df(quant_groups=quant_groups,
+                             pairs=args.pairs,
+                             ratio_function=ratio_function,
+                             groupby_attributes=args.psm_groupby,
+                             center_method=args.center,
+                             df_format=args.df_format)
 
-        cols, data = get_psm_ratio_data_wide(psm_quant_ratios, args.pairs, args.groupby_filename)
-        psm_df = pd.DataFrame(data, columns=cols)
-
-        psm_file = os.path.join(args.output_folder, args.psm_file + f'.{args.output_type}')
-        if args.output_type == 'csv':
-            psm_df.to_csv(os.path.join(args.output_folder, psm_file), index=False)
-        elif args.output_type == 'parquet':
-            psm_df.to_parquet(os.path.join(args.output_folder, psm_file))
-        else:
-            raise ValueError(f'Invalid output type: {args.output_type}')
-        print(f'PSM Ratios written to {psm_file}')
+        file_path = str(os.path.join(args.output, args.psm_file + f'.{args.output_type}'))
+        write_to_file(df, file_path, args.output_type)
+        print(f'PSM Ratios written to {file_path}')
         print()
 
-        del psm_quant_ratios
-        del psm_df
-        del data
+        del df
 
     if not args.no_peptides:
         print('Grouping Peptides...')
-        peptide_quant_ratios = group_by_peptides(quant_groups, args.pairs, args.groupby_filename, ratio_function)
-        assign_qvalues(peptide_quant_ratios)
-        assign_centered_log2_ratios(peptide_quant_ratios, args.center, args.inf_replacement)
-        print(f"{'Peptide Quant Groups:':<20} {len(peptide_quant_ratios)}")
-        time.sleep(0.1)
+        df = build_ratios_df(quant_groups=quant_groups,
+                             pairs=args.pairs,
+                             ratio_function=ratio_function,
+                             groupby_attributes=args.peptide_groupby,
+                             center_method=args.center,
+                             df_format=args.df_format)
 
-        cols, data = get_peptide_ratio_data_wide(peptide_quant_ratios, args.pairs, args.groupby_filename)
-        peptide_df = pd.DataFrame(data, columns=cols)
-
-        peptide_file = os.path.join(args.output_folder, args.peptide_file + f'.{args.output_type}')
-        if args.output_type == 'csv':
-            peptide_df.to_csv(os.path.join(args.output_folder, peptide_file), index=False)
-        elif args.output_type == 'parquet':
-            peptide_df.to_parquet(os.path.join(args.output_folder, peptide_file))
-        else:
-            raise ValueError(f'Invalid output type: {args.output_type}')
-        print(f'Peptide Ratios written to {peptide_file}')
+        file_path = str(os.path.join(args.output, args.peptide_file + f'.{args.output_type}'))
+        write_to_file(df, file_path, args.output_type)
+        print(f'Peptide Ratios written to {file_path}')
         print()
 
-        del peptide_quant_ratios
-        del peptide_df
-        del data
+        del df
 
     if not args.no_proteins:
         print('Grouping Proteins...')
-        quant_groups = filter_quant_groups(quant_groups, args.filter)
-        protein_quant_ratios = group_by_proteins(quant_groups, args.pairs, args.groupby_filename, ratio_function)
-        assign_qvalues(protein_quant_ratios)
-        assign_centered_log2_ratios(protein_quant_ratios, args.center, args.inf_replacement)
-        print(f"{'Protein Quant Groups:':<20} {len(protein_quant_ratios)}")
-        time.sleep(0.1)
+        # filter out proteins with less than 2 peptides
 
-        cols, data = get_protein_ratio_data_wide(protein_quant_ratios, args.pairs, args.groupby_filename)
-        protein_df = pd.DataFrame(data, columns=cols)
+        df = build_ratios_df(quant_groups=quant_groups,
+                             pairs=args.pairs,
+                             ratio_function=ratio_function,
+                             groupby_attributes=args.protein_groupby,
+                             center_method=args.center,
+                             df_format=args.df_format)
 
-        protein_file = os.path.join(args.output_folder, args.protein_file + f'.{args.output_type}')
-        if args.output_type == 'csv':
-            protein_df.to_csv(os.path.join(args.output_folder, protein_file), index=False)
-        elif args.output_type == 'parquet':
-            protein_df.to_parquet(os.path.join(args.output_folder, protein_file))
-        else:
-            raise ValueError(f'Invalid output type: {args.output_type}')
-        print(f'Protein Ratios written to {protein_file}')
+        file_path = str(os.path.join(args.output, args.protein_file + f'.{args.output_type}'))
+        write_to_file(df, file_path, args.output_type)
+        print(f'Protein Ratios written to {file_path}')
         print()
 
-        del protein_quant_ratios
-        del protein_df
-        del data
+        del df
 
     print('Done!')
 
 
 if __name__ == '__main__':
     run()
+
+    """
+    compare tmt_result/results.sage.parquet tmt_result/ --pairs '1,2;1,3' --groups '(1,16p_A_1.mzparquet,0,1);(1,16p_A_1.mzparquet,1,1);(1,16p_A_1.mzparquet,2,1);(2,16p_A_1.mzparquet,3,1);(2,16p_A_1.mzparquet,4,1);(2,16p_A_1.mzparquet,5,1);(2,16p_A_1.mzparquet,6,1);(2,16p_A_1.mzparquet,7,1);(2,16p_A_1.mzparquet,8,1)'
+    """
