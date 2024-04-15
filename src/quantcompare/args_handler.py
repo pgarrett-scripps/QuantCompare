@@ -73,8 +73,6 @@ def parse_args() -> argparse.Namespace:
                                        help='Center the Log2 Ratios around the mean/median.')
     normalization_options.add_argument('--ratio_function', choices=['mean_ratio_rollup', 'reference_mean_ratio_rollup'],
                                        default='mean_ratio_rollup')
-    normalization_options.add_argument('--impute_method', choices=['min', 'none'], default='none',
-                                       help='Impute missing values in the reporter ion intensities. Default is none.')
     normalization_options.add_argument('--inf_replacement', default=100,
                                        help='Infinite values cause many problem with the statistics. This value will be used to '
                                             'replace infinite values at the log2 ratio level. Default is 100. (-inf will be replaced '
@@ -133,5 +131,13 @@ def parse_args() -> argparse.Namespace:
                                   help='Group by columns for Peptides.', type=parse_groupby_columns)
     grouping_options.add_argument('--protein_groupby', default='proteins;filename',
                                   help='Group by columns for Proteins.', type=parse_groupby_columns)
+
+    imputing_options = parser.add_argument_group('Imputing Options')
+    imputing_options.add_argument('--impute_method', choices=['none', 'mean', 'median', 'min', 'max', 'constant', 'iterative', 'knn'], default='none',
+                                  help='Impute missing values in the reporter ion intensities. Default is none.')
+    imputing_options.add_argument('--impute_constant', default=0.0, type=float, help='Constant value to impute missing values with. (Only applies to constant imputation)')
+    imputing_options.add_argument('--impute_n_neighbors', default=5, type=int, help='Number of neighbors to use in KNN imputation. (Only applies to KNN imputation)')
+    imputing_options.add_argument('--impute_axis', choices=['all', 'row', 'col'], default='all', help='Axis to impute along. (Only applies to mean/median/min/max imputation)')
+    imputing_options.add_argument('--missing_value', default=0.0, type=float, help='Value to consider as missing. Default is 0.0.')
 
     return parser.parse_args()

@@ -85,7 +85,7 @@ def mean_ratio_rollup(arr1: np.array, arr2: np.array, inf_replacement: float = 1
     """
     Calculate the ratio of the mean of each row of two arrays.
 
-    .. code-block:: python
+    . code-block:: python
 
         >>> arr1 = np.array([[100, 110, 105], [200, 210, 205]])
         >>> arr2 = np.array([[200, 230, 240, 200], [400, 430, 440, 410]])

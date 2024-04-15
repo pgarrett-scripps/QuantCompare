@@ -3,7 +3,7 @@ import os
 import time
 from functools import partial
 from itertools import groupby
-from typing import Any, Dict, List, Tuple, Callable, Set, TypeAlias, Literal
+from typing import Any, Dict, List, Tuple, Callable, Set, TypeAlias, Literal, Optional
 import numpy as np
 import pprint
 import pandas as pd
@@ -15,6 +15,8 @@ import warnings
 from quantcompare.args_handler import parse_args
 from quantcompare.dclasses import Group, GroupRatio, QuantGroup, Psm
 from quantcompare.file_writer import get_ratio_data_wide
+
+from quantcompare.impute import NoneImpute, MeanImpute, get_imputer, Impute
 from quantcompare.ratio_rollup import mean_ratio_rollup, reference_mean_ratio_rollup
 
 # Suppress only the specific RuntimeWarning related to precision loss in scipy
@@ -361,16 +363,16 @@ def parse_sage_results(df: pd.DataFrame, max_rows: int, keep_decoy: bool, keep_c
     df['reporter_ion_intensity'] = df['reporter_ion_intensity'].apply(lambda x: [np.nan]*len(x) if np.all(x == 0) else x)
 
     # count NA
-    na_count = df['reporter_ion_intensity'].apply(lambda x: np.sum(np.isnan(x))).sum()
-    print(f'{"Total NA values:":<30} {na_count}')
-
+    #na_count = df['reporter_ion_intensity'].apply(lambda x: np.sum(np.isnan(x))).sum()
+    #print(f'{"Total NA values:":<30} {na_count}')
 
     return df
 
 
 def normalize_df(df: pd.DataFrame, groups: List[Group], keep_unused_channels: bool,
                  intra_file_normalization: IntensityNormalizationMethod,
-                 inter_file_normalization: IntensityNormalizationMethod, row_normalization: bool) -> pd.DataFrame:
+                 inter_file_normalization: IntensityNormalizationMethod, row_normalization: bool,
+                 imputer: Impute, missing_value: Any) -> pd.DataFrame:
     """
     Normalize the DataFrame based on the groups and normalization methods.
 
@@ -402,16 +404,16 @@ def normalize_df(df: pd.DataFrame, groups: List[Group], keep_unused_channels: bo
         >>> data['reporter_ion_intensity'] = [[1, 2, 0], [3, 4, 0], [5, 6, 0], [7, 8, 0]]
 
         >>> groups = [Group('1', 'file1', 0, 1), Group('2', 'file1', 1, 1)]
-        >>> df = normalize_df(pd.DataFrame(data), groups, False, 'median', 'median', False)
+        >>> df = normalize_df(pd.DataFrame(data), groups, False, 'median', 'median', False, None, 0)
         >>> np.array(df['normalized_reporter_ion_intensity'].tolist()).shape # One column removed
         (4, 2)
-        >>> df = normalize_df(pd.DataFrame(data), groups, True, 'median', 'median', False)
+        >>> df = normalize_df(pd.DataFrame(data), groups, True, 'median', 'median', False, None, 0)
         >>> np.array(df['normalized_reporter_ion_intensity'].tolist()).shape # Column kept
         (4, 3)
-        >>> df = normalize_df(pd.DataFrame(data), groups, True, 'none', 'none', True)
+        >>> df = normalize_df(pd.DataFrame(data), groups, True, 'none', 'none', True, None, 0)
         >>> np.sum(np.array(df['normalized_reporter_ion_intensity'].tolist()), axis=1) # floating point error
         array([1.00000003, 1.00000003, 1.00000003, 1.00000003])
-        >>> df = normalize_df(pd.DataFrame(data), groups, False, 'median', 'median', False)
+        >>> df = normalize_df(pd.DataFrame(data), groups, False, 'median', 'median', False, None, 0)
         >>> np.array(df['normalized_reporter_ion_intensity'].tolist()) # sol_sums = [16, 20, 0] sum_avg = 18
         array([[1.12499988, 1.79999971],
                [3.37499976, 3.59999943],
@@ -419,6 +421,7 @@ def normalize_df(df: pd.DataFrame, groups: List[Group], keep_unused_channels: bo
                [7.87499952, 7.19999886]])
 
     """
+
     # split sage df based on filename
     sage_dfs = {}
     for filename in df['filename'].unique():
@@ -434,9 +437,14 @@ def normalize_df(df: pd.DataFrame, groups: List[Group], keep_unused_channels: bo
         intensities = np.vstack(file_df['reporter_ion_intensity'].values).astype(np.float32)
 
         # Filter unused channels
+        # TODO: Another way of doing is is to set unused channel values to nan
         if not keep_unused_channels:
             intensities = intensities[:, used_channel_indexes]
             file_df['intensities'] = intensities.tolist()
+
+        # TODO: Should imputation be done before normalization?
+        if imputer is not None:
+            imputer.impute(intensities, inplace=True, missing_value=missing_value)
 
         # Copy the intensities for normalization
         norm_intensities = copy.deepcopy(intensities)
@@ -449,11 +457,11 @@ def normalize_df(df: pd.DataFrame, groups: List[Group], keep_unused_channels: bo
 
         norm_intensities /= channel_concentrations
 
-        sums = np.sum(norm_intensities, axis=0, keepdims=True)
+        sums = np.nansum(norm_intensities, axis=0, keepdims=True)
         if intra_file_normalization == 'median':
-            norm_intensities /= np.median(sums) * sums
+            norm_intensities /= np.nanmedian(sums) * sums
         elif intra_file_normalization == 'mean':
-            norm_intensities /= np.mean(sums) * sums
+            norm_intensities /= np.nanmean(sums) * sums
         elif intra_file_normalization == 'none':
             pass
         else:
@@ -461,9 +469,10 @@ def normalize_df(df: pd.DataFrame, groups: List[Group], keep_unused_channels: bo
 
         # Normalize each row to sum to 1
         if row_normalization:
-            row_sums = np.sum(norm_intensities, axis=1, keepdims=True)
+            row_sums = np.nansum(norm_intensities, axis=1, keepdims=True)
             norm_intensities /= row_sums
 
+        file_df['reporter_ion_intensity'] = intensities.tolist()
         file_df['normalized_reporter_ion_intensity'] = norm_intensities.tolist()
 
         sage_dfs[filename] = file_df
@@ -474,11 +483,11 @@ def normalize_df(df: pd.DataFrame, groups: List[Group], keep_unused_channels: bo
     # inter_file_normalization
     norm_intensities = np.vstack(df['normalized_reporter_ion_intensity'].values).astype(np.float32)
 
-    sums = np.sum(norm_intensities, axis=0, keepdims=True)
+    sums = np.nansum(norm_intensities, axis=0, keepdims=True)
     if inter_file_normalization == 'median':
-        norm_intensities /= np.median(sums) * sums
+        norm_intensities /= np.nanmedian(sums) * sums
     elif inter_file_normalization == 'mean':
-        norm_intensities /= np.mean(sums) * sums
+        norm_intensities /= np.nanmean(sums) * sums
     elif inter_file_normalization == 'none':
         pass
     else:
@@ -569,7 +578,6 @@ def filter_quant_groups(quant_groups: List[QuantGroup], filter_type: ProteinFilt
     return quant_groups
 
 
-
 def run():
     # TODO: Possibly fix nan value and inf value replacement
 
@@ -599,13 +607,35 @@ def run():
                                  qvalue_threshold=args.qvalue_threshold,
                                  keep_psm=args.keep_psm)
 
+    # Imputer
+    imputer = get_imputer(args.impute_method, args.impute_constant, args.impute_axis, args.impute_n_neighbors)
+
     sage_df = normalize_df(df=sage_df,
                            groups=args.groups,
                            keep_unused_channels=args.keep_unused_channels,
                            intra_file_normalization=args.intra_file_normalization,
                            inter_file_normalization=args.inter_file_normalization,
-                           row_normalization=args.row_normalization)
+                           row_normalization=args.row_normalization,
+                           imputer=imputer,
+                           missing_value=args.missing_value)
 
+    def check_nan_in_list(lst):
+        return not any(np.isnan(x) for x in lst if isinstance(x, float))
+
+    # Apply this function to create a mask
+
+    # add a column for nan count within 'normalized_reporter_ion_intensity' column
+    sage_df['nan_count'] = sage_df['normalized_reporter_ion_intensity'].apply(lambda x: np.sum(np.isnan(x)))
+
+    # remove rows with all nan values
+    mask = sage_df['nan_count'] == sage_df['normalized_reporter_ion_intensity'].apply(lambda x: len(x))
+    sage_df = sage_df[~mask].reset_index(drop=True)
+
+    # remove rows which have more nan values that args.max_nan (doesn't make sense since nan are only applied to full rows)
+    #mask = sage_df['nan_count'] <= args.max_nan
+    #sage_df = sage_df[mask].reset_index(drop=True)
+
+    # remove NAN rows
     quant_groups = make_quant_groups(sage_df, args.groups)
     print('Creating Quant Groups...')
     print(f"{'Total Quant Groups:':<30} {len(quant_groups)}")
