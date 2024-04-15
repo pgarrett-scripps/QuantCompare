@@ -11,8 +11,13 @@ def parse_group(arg) -> List[Group]:
     try:
         groups = []
         for group in arg.split(';'):
-            group, filename, n, scale = group.rstrip(')').lstrip('(').split(',')
-            groups.append(Group(group, filename, int(n), float(scale)))
+            group_elems = group.rstrip(')').lstrip('(').split(',')
+            if len(group_elems)  == 4:
+                group, filename, n, scale = group_elems
+                groups.append(Group(group, filename, int(n), float(scale)))
+            else:
+                raise ValueError
+
         return groups
     except ValueError:
         raise argparse.ArgumentTypeError("Groups must be in format '(GROUP,FILENAME,CHANNEL_INDEX);(...);'")

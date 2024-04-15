@@ -1,6 +1,6 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
-from typing import Any, List, Tuple, Callable
+from typing import Any, List, Tuple, Callable, Optional
 
 import numpy as np
 
@@ -33,13 +33,36 @@ class Pair:
         return f'Pair({self.group1}, {self.group2})'
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class Psm:
+    labels: list
+    values: list
+    _attributes: dict = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self):
+        if len(self.labels) != len(self.values):
+            raise ValueError("Labels and values must have the same length.")
+
+        for label, value in zip(self.labels, self.values):
+            setattr(self, label, value)
+            self._attributes[label] = value
+
+    def __repr__(self):
+        attrs = ', '.join(f"{k}={v!r}" for k, v in self._attributes.items())
+        return f"{self.__class__.__name__}({attrs})"
+
+
+@dataclass(frozen=True)
+class PsmOld:
     peptide: str
     charge: int
     filename: str
     proteins: List[str]
     scannr: int
+    site: int
+    bio_rep: Any
+    tech_rep: Any
+    decoy: bool
     intensities: np.array(np.float32)
     norm_intensities: np.array(np.float32)
 
@@ -48,7 +71,7 @@ class Psm:
                 f'{list(self.intensities)}, {list(self.norm_intensities)})')
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=False)
 class QuantGroup:
     group: Any
     group_indices: List[int]
@@ -56,38 +79,6 @@ class QuantGroup:
 
     def __str__(self):
         return f'QuantGroup({self.group}, {self.group_indices}, {self.psm})'
-
-    @property
-    def peptide(self) -> str:
-        return self.psm.peptide
-
-    @property
-    def charge(self) -> int:
-        return self.psm.charge
-
-    @property
-    def proteins(self) -> List[str]:
-        return self.psm.proteins
-
-    @property
-    def scannr(self) -> int:
-        return self.psm.scannr
-
-    @property
-    def filename(self) -> str:
-        return self.psm.filename
-
-    @property
-    def intensities(self) -> np.ndarray:
-        if isinstance(self.psm.intensities, List):
-            return np.array(self.psm.intensities)[self.group_indices]
-        return self.psm.intensities[self.group_indices]
-
-    @property
-    def norm_intensities(self) -> np.ndarray:
-        if isinstance(self.psm.norm_intensities, List):
-            return np.array(self.psm.norm_intensities)[self.group_indices]
-        return self.psm.norm_intensities[self.group_indices]
 
 
 @dataclass()
@@ -108,36 +99,6 @@ class GroupRatio:
 
     def __str__(self):
         return f'GroupRatio(Pair=({self.group1}, {self.group2}), log2_ratio={self.log2_ratio}, log2_norm_ratio={self.log2_norm_ratio})'
-
-    @property
-    def peptide(self) -> str:
-        assert all(qg.psm.peptide == self.QuantGroup1[0].psm.peptide for qg in self.QuantGroup1)
-        assert all(qg.psm.peptide == self.QuantGroup1[0].psm.peptide for qg in self.QuantGroup2)
-        return self.QuantGroup1[0].psm.peptide
-
-    @property
-    def charge(self) -> int:
-        assert all(qg.psm.charge == self.QuantGroup1[0].psm.charge for qg in self.QuantGroup1)
-        assert all(qg.psm.charge == self.QuantGroup1[0].psm.charge for qg in self.QuantGroup2)
-        return self.QuantGroup1[0].psm.charge
-
-    @property
-    def proteins(self) -> List[str]:
-        assert all(qg.psm.proteins == self.QuantGroup1[0].psm.proteins for qg in self.QuantGroup1)
-        assert all(qg.psm.proteins == self.QuantGroup1[0].psm.proteins for qg in self.QuantGroup2)
-        return self.QuantGroup1[0].psm.proteins
-
-    @property
-    def scannr(self) -> int:
-        assert all(qg.psm.scannr == self.QuantGroup1[0].psm.scannr for qg in self.QuantGroup1)
-        assert all(qg.psm.scannr == self.QuantGroup1[0].psm.scannr for qg in self.QuantGroup2)
-        return self.QuantGroup1[0].psm.scannr
-
-    @property
-    def filename(self) -> str:
-        assert all(qg.psm.filename == self.QuantGroup1[0].psm.filename for qg in self.QuantGroup1)
-        assert all(qg.psm.filename == self.QuantGroup1[0].psm.filename for qg in self.QuantGroup2)
-        return self.QuantGroup1[0].psm.filename
 
     @cached_property
     def _log2_ratio(self) -> Tuple[float, float, float]:
@@ -213,22 +174,22 @@ class GroupRatio:
 
     @cached_property
     def group1_intensity_arr(self) -> np.ndarray:
-        group1_array = np.array([qg.intensities for qg in self.QuantGroup1], dtype=np.float32)
+        group1_array = np.array([qg.psm.reporter_ion_intensity for qg in self.QuantGroup1], dtype=np.float32)
         return group1_array
 
     @cached_property
     def group2_intensity_arr(self) -> np.ndarray:
-        group2_array = np.array([qg.intensities for qg in self.QuantGroup2], dtype=np.float32)
+        group2_array = np.array([qg.psm.reporter_ion_intensity for qg in self.QuantGroup2], dtype=np.float32)
         return group2_array
 
     @cached_property
     def group1_norm_intensity_arr(self) -> np.ndarray:
-        group1_array = np.array([qg.norm_intensities for qg in self.QuantGroup1], dtype=np.float32)
+        group1_array = np.array([qg.psm.normalized_reporter_ion_intensity for qg in self.QuantGroup1], dtype=np.float32)
         return group1_array
 
     @cached_property
     def group2_norm_intensity_arr(self) -> np.ndarray:
-        group2_array = np.array([qg.norm_intensities for qg in self.QuantGroup2], dtype=np.float32)
+        group2_array = np.array([qg.psm.normalized_reporter_ion_intensity for qg in self.QuantGroup2], dtype=np.float32)
         return group2_array
 
     @property

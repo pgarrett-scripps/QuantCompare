@@ -3,7 +3,7 @@ import os
 import time
 from functools import partial
 from itertools import groupby
-from typing import Any, Dict, List, Tuple, Callable, Set, TypeAlias, Literal, Optional
+from typing import Any, Dict, List, Tuple, Callable, TypeAlias, Literal
 import numpy as np
 import pprint
 import pandas as pd
@@ -66,9 +66,14 @@ def make_quant_groups(df: pd.DataFrame, groups: List[Group]) -> List[QuantGroup]
 
     quant_groups = []
     # Create Psm objects for each row in the group
-    psms = [Psm(row['peptide'], row['charge'], row['filename'], row['proteins'], row['scannr'],
+    """
+    psms = [Psm(row['peptide'], row['charge'], row['filename'], row['proteins'], row['scannr'], row['site'],
+                row['bio_rep'], row['tech_rep'], row['is_decoy'],
                 np.array(row['reporter_ion_intensity'], dtype=np.float32),
                 np.array(row['normalized_reporter_ion_intensity'], dtype=np.float32))
+            for i, row in df.iterrows()]
+    """
+    psms = [Psm(df.columns, row.values)
             for i, row in df.iterrows()]
 
     # Create QuantGroup objects for each Psm and associated groups
@@ -536,23 +541,26 @@ def build_ratios_df(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, Any]]
     """
 
     # QuantGroups, GroupRatios, and PSMs all have peptide, protein, charge, filename, and scannr attributes
-    grouping_func = lambda g: [g.__getattribute__(group) for group in groupby_attributes]
+    quant_grouping_func = lambda g: [g.psm.__getattribute__(group) for group in groupby_attributes]
 
     quant_ratios = group_quant_groups(quant_groups=quant_groups,
                                       pairs=pairs,
-                                      group_function=grouping_func,
+                                      group_function=quant_grouping_func,
                                       ratio_function=ratio_function)
     assign_qvalues(quant_ratios)
     assign_centered_log2_ratios(quant_ratios, center_method)
     print(f"{'Quant Groups:':<20} {len(quant_ratios)}")
     time.sleep(0.1)
 
+    ratio_grouping_func = lambda g: [g.QuantGroup1[0].psm.__getattribute__(group) for group in groupby_attributes]
+
+
     # Format the DataFrame
     if df_format == 'wide':
         cols, data = get_ratio_data_wide(quant_ratios=quant_ratios,
                                          pairs=pairs,
                                          groupby_cols=groupby_attributes,
-                                         groupby_func=grouping_func)
+                                         groupby_func=ratio_grouping_func)
     elif df_format == 'long':
         raise NotImplementedError('Long format not implemented yet.')
     else:
@@ -598,6 +606,18 @@ def run():
 
     print(f'Reading Input File...')
     sage_df = pd.read_parquet(args.input, engine='pyarrow')
+
+    # if bio_rep not in columns, add it
+    if 'bio_rep' not in sage_df.columns:
+        sage_df['bio_rep'] = 0
+
+    # if tech_rep not in columns, add it
+    if 'tech_rep' not in sage_df.columns:
+        sage_df['tech_rep'] = 0
+
+    # if site not in columns, add it
+    if 'site' not in sage_df.columns:
+        sage_df['site'] = 0
 
     sage_df = parse_sage_results(df=sage_df,
                                  max_rows=args.max_rows,
