@@ -279,6 +279,7 @@ def parse_sage_results(df: pd.DataFrame, max_rows: int, keep_decoy: bool, keep_c
     :param df: The DataFrame with the input data.
     :param max_rows: The maximum number of rows to read from the input file.
     :param keep_decoy: Whether to keep decoy PSMs.
+    :param keep_contaminant: Whether to keep contaminant PSMs.
     :param qvalue_level: The q-value level to filter on. One of 'peptide', 'protein', 'spectrum', 'all' or 'none'.
     :param qvalue_threshold: The q-value threshold for significance, any PSM with a q-value below this threshold at the
                              specified level(s) will be kept.
@@ -354,22 +355,22 @@ def parse_sage_results(df: pd.DataFrame, max_rows: int, keep_decoy: bool, keep_c
 
     print(f'{"Filtered PSMs (Qvalue):":<30} {starting_rows - len(df)}')
     starting_rows = len(df)
-
     # drop duplicates (keep args.keep_psm top PSMs per scan number per file)
     if keep_psm > 0:
         df.sort_values(['scannr', 'filename', 'rank'], ascending=[True, True, True], inplace=True)
         df = df.groupby(['scannr', 'filename']).head(keep_psm).reset_index(drop=True)
-
     print(f'{"Filtered PSMs (Chimeric):":<30} {starting_rows - len(df)}')
+    starting_rows = len(df)
+
+    df['reporter_ion_intensity'] = df['reporter_ion_intensity'].apply(
+        lambda x: [np.nan] * len(x) if np.all(x == 0) else x)
+    df['nan_count'] = df['reporter_ion_intensity'].apply(lambda x: np.sum(np.isnan(x)))
+    df = df[df['nan_count'] == 0].reset_index(drop=True)
+
+    print(f'{"Filtered PSMs (NANs):":<30} {starting_rows - len(df)}')
+
     print(f'{"Remaining PSMs:":<30} {len(df)}')
     print()
-
-    # for rows which have all 0 intensities, replace with an array of NaNs
-    df['reporter_ion_intensity'] = df['reporter_ion_intensity'].apply(lambda x: [np.nan]*len(x) if np.all(x == 0) else x)
-
-    # count NA
-    #na_count = df['reporter_ion_intensity'].apply(lambda x: np.sum(np.isnan(x))).sum()
-    #print(f'{"Total NA values:":<30} {na_count}')
 
     return df
 
@@ -473,7 +474,7 @@ def normalize_df(df: pd.DataFrame, groups: List[Group], keep_unused_channels: bo
             raise ValueError(f'Invalid global normalization method: {intra_file_normalization}')
 
         # Normalize each row to sum to 1
-        if row_normalization:
+        if row_normalization is True:
             row_sums = np.nansum(norm_intensities, axis=1, keepdims=True)
             norm_intensities /= row_sums
 
@@ -481,6 +482,7 @@ def normalize_df(df: pd.DataFrame, groups: List[Group], keep_unused_channels: bo
         file_df['normalized_reporter_ion_intensity'] = norm_intensities.tolist()
 
         sage_dfs[filename] = file_df
+
 
     # Combine the dataframes
     df = pd.concat(sage_dfs.values(), ignore_index=True)
@@ -553,7 +555,6 @@ def build_ratios_df(quant_groups: List[QuantGroup], pairs: List[Tuple[Any, Any]]
     time.sleep(0.1)
 
     ratio_grouping_func = lambda g: [g.QuantGroup1[0].psm.__getattribute__(group) for group in groupby_attributes]
-
 
     # Format the DataFrame
     if df_format == 'wide':

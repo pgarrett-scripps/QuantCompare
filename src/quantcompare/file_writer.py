@@ -6,6 +6,7 @@ import tqdm as tqdm
 
 from quantcompare.dclasses import GroupRatio
 
+
 def get_ratio_data_wide(quant_ratios: List[GroupRatio], pairs: List[Tuple[Any, Any]], groupby_cols: List[str],
                         groupby_func: Callable) -> (List[str], List[List[Any]]):
     """

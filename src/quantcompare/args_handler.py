@@ -12,7 +12,7 @@ def parse_group(arg) -> List[Group]:
         groups = []
         for group in arg.split(';'):
             group_elems = group.rstrip(')').lstrip('(').split(',')
-            if len(group_elems)  == 4:
+            if len(group_elems) == 4:
                 group, filename, n, scale = group_elems
                 groups.append(Group(group, filename, int(n), float(scale)))
             else:

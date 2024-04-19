@@ -37,6 +37,8 @@ class Pair:
 class Psm:
     labels: list
     values: list
+    #reporter_ion_intensity: np.ndarray
+    #normalized_reporter_ion_intensity: np.ndarray
     _attributes: dict = field(default_factory=dict, init=False, repr=False)
 
     def __post_init__(self):
@@ -79,6 +81,18 @@ class QuantGroup:
 
     def __str__(self):
         return f'QuantGroup({self.group}, {self.group_indices}, {self.psm})'
+
+    @property
+    def reporter_ion_intensity(self) -> np.ndarray:
+        if isinstance(self.psm.reporter_ion_intensity, List):
+            return np.array(self.psm.reporter_ion_intensity)[self.group_indices]
+        return self.psm.reporter_ion_intensity[self.group_indices]
+
+    @property
+    def normalized_reporter_ion_intensity(self) -> np.ndarray:
+        if isinstance(self.psm.normalized_reporter_ion_intensity, List):
+            return np.array(self.psm.normalized_reporter_ion_intensity)[self.group_indices]
+        return self.psm.normalized_reporter_ion_intensity[self.group_indices]
 
 
 @dataclass()
@@ -174,22 +188,22 @@ class GroupRatio:
 
     @cached_property
     def group1_intensity_arr(self) -> np.ndarray:
-        group1_array = np.array([qg.psm.reporter_ion_intensity for qg in self.QuantGroup1], dtype=np.float32)
+        group1_array = np.array([qg.reporter_ion_intensity for qg in self.QuantGroup1], dtype=np.float32)
         return group1_array
 
     @cached_property
     def group2_intensity_arr(self) -> np.ndarray:
-        group2_array = np.array([qg.psm.reporter_ion_intensity for qg in self.QuantGroup2], dtype=np.float32)
+        group2_array = np.array([qg.reporter_ion_intensity for qg in self.QuantGroup2], dtype=np.float32)
         return group2_array
 
     @cached_property
     def group1_norm_intensity_arr(self) -> np.ndarray:
-        group1_array = np.array([qg.psm.normalized_reporter_ion_intensity for qg in self.QuantGroup1], dtype=np.float32)
+        group1_array = np.array([qg.normalized_reporter_ion_intensity for qg in self.QuantGroup1], dtype=np.float32)
         return group1_array
 
     @cached_property
     def group2_norm_intensity_arr(self) -> np.ndarray:
-        group2_array = np.array([qg.psm.normalized_reporter_ion_intensity for qg in self.QuantGroup2], dtype=np.float32)
+        group2_array = np.array([qg.normalized_reporter_ion_intensity for qg in self.QuantGroup2], dtype=np.float32)
         return group2_array
 
     @property
